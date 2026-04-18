@@ -1,129 +1,145 @@
-# Workspacer System
+# Workspacer For Codex App For Windows
 
-Codex-only window layout layer for [Workspacer](https://github.com/workspacer/workspacer) on Windows 11.
+Dedicated [Workspacer](https://github.com/workspacer/workspacer) setup for **Codex App for Windows** on Windows 11.
 
-It manages only Codex windows (main + detached), leaves everything else untouched, and adds a local recovery/hardening runtime.
+What it does:
 
-## Quick Start (2 minutes)
+- manages only Codex App for Windows top-level windows
+- includes the main window and detached/extra Codex windows
+- leaves every non-Codex app untouched
+- adds a local runtime, startup and recovery layer so the setup is reproducible
 
-1. Clone the repo to the canonical install path.
-2. Run the installer script.
+## Install
 
-```powershell
-$target = Join-Path $HOME '.config\workspacer-system'
-git clone https://github.com/dummics/workspacer-codex-layout.git $target
-powershell -ExecutionPolicy Bypass -File (Join-Path $target 'scripts\install-workspacer-system.ps1')
+Canonical install path:
+
+```text
+%USERPROFILE%\.config\workspacer-system
 ```
 
-If `wsp status` shows running + healthy, setup is complete.
-
-## Installation
-
-### Manual (copy/paste)
+Run this:
 
 ```powershell
-Set-ExecutionPolicy -Scope Process Bypass -Force
 $target = Join-Path $HOME '.config\workspacer-system'
 if (-not (Test-Path $target)) {
     git clone https://github.com/dummics/workspacer-codex-layout.git $target
 }
-Set-Location $target
-powershell -ExecutionPolicy Bypass -File .\scripts\install-workspacer-system.ps1
+powershell -ExecutionPolicy Bypass -File (Join-Path $target 'scripts\install-workspacer-system.ps1')
 ```
 
-### Agent install (Codex/LLM helper)
+Install is complete when `wsp status` shows:
 
-Use the prompt below with your agent.
+- `Running : True`
+- `Health : healthy`
+- `WatcherPatched : True`
 
-<details>
-<summary>Show agent prompt for full install and validation</summary>
-
-```text
-You are on Windows PowerShell. Configure this repo as a working Codex-only Workspacer runtime.
-
-Canonical repository path:
-%USERPROFILE%\.config\workspacer-system
-
-Rules:
-- Use the canonical path above.
-- Use only commands needed for clone/setup/validation.
-- Do not edit files unless strictly required.
-- Prefer Git as source of truth for install/update.
-- Keep source Workspacer install untouched; operate through repo scripts/runtime.
-- Stop and report clearly on first blocking error.
-
-Steps:
-1) Clone https://github.com/dummics/workspacer-codex-layout.git into %USERPROFILE%\.config\workspacer-system if missing.
-2) cd to that path.
-3) Run powershell -ExecutionPolicy Bypass -File .\scripts\install-workspacer-system.ps1
-4) Dot-source scripts\workspacer-tools.ps1.
-5) Run wsp status.
-4) Return:
-   - each command executed
-   - final status summary (running/health/supervisor/task)
-   - any warning and exact command to recover.
-```
-
-</details>
-
-## Daily Usage
+## Use
 
 ```powershell
+Set-Location (Join-Path $HOME '.config\workspacer-system')
 . .\scripts\workspacer-tools.ps1
 wsp help
-wsp install
-wsp status
-wsp self-update
-wsp restart
-wsp recover
 ```
 
-Essential commands:
+Main commands:
 
-- `wsp help`
 - `wsp install`
 - `wsp status`
-- `wsp start`
-- `wsp stop`
 - `wsp restart`
 - `wsp recover`
 - `wsp self-update`
 
+Hotkey:
+
+- `Ctrl+F2` toggles the Codex layout
+
 <details>
 <summary>Show advanced commands</summary>
 
-- `wsp hardening-install` / `wsp hardening-remove`
-- `wsp watcher-fix` / `wsp watcher-restore`
-- `wsp startup-refresh`
-- `wsp supervisor-status` / `wsp supervisor-restart`
-- `wsp tasks`
+```powershell
+wsp start
+wsp stop
+wsp hardening-install
+wsp hardening-remove
+wsp watcher-fix
+wsp watcher-restore
+wsp startup-refresh
+wsp supervisor-status
+wsp supervisor-restart
+wsp tasks
+```
 
 </details>
 
-Hotkey: `Ctrl+F2` toggles Codex layout.
+## Update
 
-## Updates
-
-From inside the canonical repo clone:
+From inside the installed repo:
 
 ```powershell
 . .\scripts\workspacer-tools.ps1
 wsp self-update
 ```
 
-`wsp self-update` requires a clean Git working tree and performs a fast-forward pull before reinstalling the runtime.
+`wsp self-update` requires a clean Git working tree and uses fast-forward only.
+
+## Agent Prompt
+
+Use this prompt with an agent if you want deterministic install/update from Git:
+
+<details>
+<summary>Show install prompt</summary>
+
+```text
+You are on Windows PowerShell. Install or update this repository as the dedicated Workspacer setup for Codex App for Windows.
+
+Repository URL:
+https://github.com/dummics/workspacer-codex-layout.git
+
+Canonical path:
+%USERPROFILE%\.config\workspacer-system
+
+Rules:
+- Use Git as the source of truth.
+- Use exactly the canonical path above.
+- Do not edit repository files unless strictly required by a real blocker.
+- Keep the original Workspacer install untouched; use the repo runtime/scripts only.
+- Stop immediately on the first blocking error and report it clearly.
+
+Steps:
+1. If %USERPROFILE%\.config\workspacer-system does not exist, clone the repository there.
+2. If it already exists, verify it is a Git repository and do not overwrite local changes.
+3. Run:
+   powershell -ExecutionPolicy Bypass -File "%USERPROFILE%\.config\workspacer-system\scripts\install-workspacer-system.ps1"
+4. Then run:
+   - Set-Location "%USERPROFILE%\.config\workspacer-system"
+   - . .\scripts\workspacer-tools.ps1
+   - wsp status
+5. Return:
+   - every command executed
+   - final `wsp status` output summary
+   - whether install is healthy
+   - exact recovery command if anything failed
+
+Success criteria:
+- Running = True
+- Health = healthy
+- WatcherPatched = True
+- ConfigRootMatches = True
+```
+
+</details>
 
 ## Notes
 
-- Source install default: `%ProgramFiles%\workspacer` (`WORKSPACER_SOURCE_DIR` to override)
+- Source Workspacer install default: `%ProgramFiles%\workspacer`
 - Canonical Git install root: `%USERPROFILE%\.config\workspacer-system`
-- Local runtime default: `%LOCALAPPDATA%\Programs\workspacer-codex-runtime` (`WORKSPACER_RUNTIME_DIR` to override)
-- `WORKSPACER_CONFIG` is pinned automatically to the repository root for deterministic loading.
-- Config mirror is still synced to `%USERPROFILE%\.workspacer\workspacer.config.csx` as a fallback path.
+- Local runtime default: `%LOCALAPPDATA%\Programs\workspacer-codex-runtime`
+- `WORKSPACER_CONFIG` is pinned automatically to the repository root
+- `%USERPROFILE%\.workspacer\workspacer.config.csx` is still kept as a fallback mirror
 
 ## Disclaimer
 
-Unofficial customization layer for Workspacer. Not affiliated with Workspacer or OpenAI.
+Unofficial customization layer for Workspacer, dedicated to Codex App for Windows. Not affiliated with Workspacer or OpenAI.
 
 ## License
 
