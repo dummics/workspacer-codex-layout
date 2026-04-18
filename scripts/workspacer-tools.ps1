@@ -346,21 +346,57 @@ function Unregister-WorkspacerHardening {
     }
 }
 
+function Show-WorkspacerHelp {
+    @'
+Workspacer wrapper (`wsp`)
+
+Uso:
+  wsp help
+  wsp <comando>
+
+Comandi essenziali:
+  status              Mostra stato, health e percorsi runtime/config.
+  start               Avvia Workspacer tramite supervisor.
+  stop                Ferma processo Workspacer e watcher.
+  restart             Riavvia Workspacer in modo gestito.
+  recover             Avvia supervisor e prova recovery automatico.
+
+Comandi avanzati:
+  hardening-install   Registra la scheduled task di hardening.
+  hardening-remove    Rimuove la scheduled task di hardening.
+  tasks               Mostra dettagli della scheduled task.
+  watcher-fix         Applica patch watcher nel runtime locale.
+  watcher-restore     Ripristina watcher originale.
+  startup-refresh     Rigenera shortcut Startup.
+  supervisor-status   Mostra processo supervisor.
+  supervisor-restart  Riavvia supervisor.
+
+Note compatibilita':
+  install-hardening e remove-hardening restano supportati come alias legacy.
+'@.Trim()
+}
+
 function global:wsp {
     param(
         [Parameter(Position = 0)]
-        [ValidateSet('status', 'start', 'stop', 'restart', 'recover', 'tasks', 'install-hardening', 'remove-hardening', 'watcher-fix', 'watcher-restore', 'startup-refresh', 'supervisor-status', 'supervisor-restart')]
+        [ValidateSet('help', '-h', '--help', '/?', 'status', 'start', 'stop', 'restart', 'recover', 'hardening-install', 'hardening-remove', 'install-hardening', 'remove-hardening', 'tasks', 'watcher-fix', 'watcher-restore', 'startup-refresh', 'supervisor-status', 'supervisor-restart')]
         [string]$Action = 'status'
     )
 
     switch ($Action) {
+        'help' { Show-WorkspacerHelp }
+        '-h' { Show-WorkspacerHelp }
+        '--help' { Show-WorkspacerHelp }
+        '/?' { Show-WorkspacerHelp }
         'status' { Get-WorkspacerStatus | Format-List }
         'start' { Start-WorkspacerManaged | Format-List Id, ProcessName, StartTime }
         'stop' { Stop-WorkspacerManaged }
         'restart' { Restart-WorkspacerManaged | Format-List Id, ProcessName, StartTime }
-        'recover' { Invoke-WorkspacerRecovery | Format-List Id, ProcessName, StartTime }
+        'recover' { Invoke-WorkspacerRecovery | Format-List Action, HealthReason, ProcessId, Running }
         'tasks' { Get-WorkspacerTasks | Format-List TaskName, State, Author, Description }
+        'hardening-install' { Register-WorkspacerHardening | Format-List TaskName, State }
         'install-hardening' { Register-WorkspacerHardening | Format-List TaskName, State }
+        'hardening-remove' { Unregister-WorkspacerHardening }
         'remove-hardening' { Unregister-WorkspacerHardening }
         'watcher-fix' { Install-WorkspacerWatcherFix }
         'watcher-restore' { Restore-WorkspacerWatcherOriginal }
@@ -370,16 +406,9 @@ function global:wsp {
     }
 }
 
+function global:wsp-help { wsp help }
 function global:wsp-status { wsp status }
 function global:wsp-start { wsp start }
 function global:wsp-stop { wsp stop }
 function global:wsp-restart { wsp restart }
 function global:wsp-recover { wsp recover }
-function global:wsp-tasks { wsp tasks }
-function global:wsp-hardening-install { wsp install-hardening }
-function global:wsp-hardening-remove { wsp remove-hardening }
-function global:wsp-watcher-fix { wsp watcher-fix }
-function global:wsp-watcher-restore { wsp watcher-restore }
-function global:wsp-startup-refresh { wsp startup-refresh }
-function global:wsp-supervisor-status { wsp supervisor-status }
-function global:wsp-supervisor-restart { wsp supervisor-restart }
