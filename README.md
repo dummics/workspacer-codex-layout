@@ -64,6 +64,14 @@ Important locations are resolved from environment variables whenever possible:
 
 The legacy mirror is kept in sync so Workspacer can still recover cleanly if it falls back to the historical `.workspacer` path.
 
+## Config Script Compatibility
+
+The tracked Workspacer config script currently references `workspacer.Shared.dll` from the default Workspacer install path.
+On a standard setup this is expected to be `%ProgramFiles%\workspacer`.
+
+If your Workspacer install lives elsewhere, adjust the first `#r` line in `.config/workspacer/workspacer.config.csx` before using the config.
+This is the main remaining portability assumption in the repository.
+
 ## PowerShell Wrapper
 
 The repository provides `scripts/workspacer-tools.ps1`, which exposes the `wsp` helper function.
