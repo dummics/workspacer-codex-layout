@@ -479,14 +479,9 @@ class CodexColumnsLayoutEngine : ILayoutEngine
             return Enumerable.Empty<IWindowLocation>();
         }
 
-        if (_lastManagedWindowCount < 2)
-        {
-            CodexLayoutHelpers.RememberFloatingLocations(snapshot, overwrite: true);
-        }
-        else
-        {
-            CodexLayoutHelpers.RememberFloatingLocations(snapshot, overwrite: false);
-        }
+        // Never overwrite existing floating snapshots during tiling cycles.
+        // This avoids replacing user positioning hints with transient tile coordinates.
+        CodexLayoutHelpers.RememberFloatingLocations(snapshot, overwrite: false);
 
         var useRows = spaceHeight > spaceWidth;
         var primarySpan = Math.Max(1, (useRows ? spaceHeight : spaceWidth) / snapshot.Count);
@@ -630,13 +625,13 @@ class CodexColumnsLayoutEngine : ILayoutEngine
         CodexLayoutState.PreferredMainHandle = mainWindow.Handle;
         CodexLayoutState.PreferredMainHandleConfirmed = true;
 
+        // Keep incoming workspace order for secondaries so swap/reorder operations can be reflected.
+        var secondaryWindows = windows
+            .Where(window => window != mainWindow)
+            .ToList();
+
         return new[] { mainWindow }
-            .Concat(
-                windows
-                    .Where(window => window != mainWindow)
-                    .OrderBy(GetWindowPreferredX)
-                    .ThenBy(GetWindowPreferredY)
-                    .ThenBy(window => window.Title ?? string.Empty))
+            .Concat(secondaryWindows)
             .ToList();
     }
 
