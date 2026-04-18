@@ -1,0 +1,8 @@
+*.log
+*.user
+*.tmp
+.vs/
+.artifacts/
+bin/
+obj/
+backups/

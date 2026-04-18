@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>workspacer.Watcher</AssemblyName>
+    <RootNamespace>WorkspacerWatcherShim</RootNamespace>
+    <Version>0.9.11.3</Version>
+    <FileVersion>0.9.11.3</FileVersion>
+    <InformationalVersion>0.9.11-codex-fix3</InformationalVersion>
+    <Product>workspacer.Watcher Codex Fix</Product>
+    <Description>Codex watcher shim for Workspacer console overflow workaround.</Description>
+  </PropertyGroup>
+</Project>
