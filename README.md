@@ -9,6 +9,10 @@ What it does:
 - leaves every non-Codex app untouched
 - adds a local runtime, startup and recovery layer so the setup is reproducible
 
+## Demo
+
+![Codex Workspacer demo](assets/codex-workspacer-demo.gif)
+
 ## Install
 
 Canonical install path:
