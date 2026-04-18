@@ -21,6 +21,7 @@ static class CodexLayoutSettings
     public const int SoftColumnLimit = 5;
     public const int MinimumRecommendedPrimarySpanPx = 420;
     public const int MainWindowMinimumWidthPx = 800;
+    public const int ActiveRelayoutThrottleMs = 120;
     public const bool DiagnosticsEnabled = false;
 
     public const WsKeys ToggleLayoutKey = WsKeys.F2;
@@ -31,6 +32,7 @@ static class CodexLayoutState
 {
     public static readonly Dictionary<IntPtr, IWindowLocation> LastFloatingLocations = new Dictionary<IntPtr, IWindowLocation>();
     public static readonly Dictionary<IntPtr, int> LastKnownMonitorIndexes = new Dictionary<IntPtr, int>();
+    public static readonly Dictionary<string, DateTime> LastLayoutCommitUtc = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
     public static IntPtr PreferredMainHandle = IntPtr.Zero;
     public static bool PreferredMainHandleConfirmed;
 }
@@ -400,6 +402,14 @@ static class CodexLayoutHelpers
             return false;
         }
     }
+
+    public static List<IWindowLocation> CloneCurrentLocations(IEnumerable<IWindow> windows)
+    {
+        return windows
+            .Where(window => window != null)
+            .Select(window => CloneLocation(window.Location))
+            .ToList();
+    }
 }
 
 class CodexColumnsLayoutEngine : ILayoutEngine
@@ -451,6 +461,17 @@ class CodexColumnsLayoutEngine : ILayoutEngine
             return Enumerable.Empty<IWindowLocation>();
         }
 
+        var isForegroundCodex = CodexLayoutHelpers.IsForegroundCodexWindow();
+        if (!isForegroundCodex
+            && CodexLayoutState.LastLayoutCommitUtc.ContainsKey(_workspaceName))
+        {
+            _lastManagedWindowCount = snapshot.Count;
+            return CodexLayoutHelpers.CloneCurrentLocations(snapshot);
+        }
+
+        var shouldThrottle = isForegroundCodex
+            && ShouldThrottleRelayout(CodexLayoutSettings.ActiveRelayoutThrottleMs);
+
         if (snapshot.Count == 1)
         {
             _lastWarningWindowCount = 0;
@@ -479,6 +500,12 @@ class CodexColumnsLayoutEngine : ILayoutEngine
             return Enumerable.Empty<IWindowLocation>();
         }
 
+        if (shouldThrottle)
+        {
+            _lastManagedWindowCount = snapshot.Count;
+            return CodexLayoutHelpers.CloneCurrentLocations(snapshot);
+        }
+
         // Never overwrite existing floating snapshots during tiling cycles.
         // This avoids replacing user positioning hints with transient tile coordinates.
         CodexLayoutHelpers.RememberFloatingLocations(snapshot, overwrite: false);
@@ -504,7 +531,9 @@ class CodexColumnsLayoutEngine : ILayoutEngine
             ? _rows.CalcLayout(orderedWindows, spaceWidth, spaceHeight)
             : CalcLandscapeLayout(orderedWindows, spaceWidth, spaceHeight);
 
-        return MapLocationsToOriginalOrder(snapshot, orderedWindows, orderedLocations);
+        var mappedLocations = MapLocationsToOriginalOrder(snapshot, orderedWindows, orderedLocations);
+        CodexLayoutState.LastLayoutCommitUtc[_workspaceName] = DateTime.UtcNow;
+        return mappedLocations;
     }
 
     public void ExpandPrimaryArea()
@@ -607,6 +636,21 @@ class CodexColumnsLayoutEngine : ILayoutEngine
         }
 
         return locations;
+    }
+
+    private bool ShouldThrottleRelayout(int throttleMs)
+    {
+        if (throttleMs <= 0)
+        {
+            return false;
+        }
+
+        if (!CodexLayoutState.LastLayoutCommitUtc.TryGetValue(_workspaceName, out var lastCommitUtc))
+        {
+            return false;
+        }
+
+        return (DateTime.UtcNow - lastCommitUtc).TotalMilliseconds < throttleMs;
     }
 
     private static List<IWindow> OrderWindowsForLayout(List<IWindow> windows)
