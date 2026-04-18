@@ -823,6 +823,14 @@ Action<IConfigContext> doConfig = (context) =>
     context.Keybinds.Unsubscribe(KeyModifiers.LAlt, WsKeys.Escape);
     context.Keybinds.Unsubscribe(KeyModifiers.LAlt, WsKeys.T);
     context.Keybinds.Unsubscribe(KeyModifiers.LAlt, WsKeys.Q);
+    context.Keybinds.Unsubscribe(KeyModifiers.LAlt, WsKeys.Left);
+    context.Keybinds.Unsubscribe(KeyModifiers.LAlt, WsKeys.Right);
+    context.Keybinds.Unsubscribe(KeyModifiers.LAlt, WsKeys.W);
+    context.Keybinds.Unsubscribe(KeyModifiers.LAlt, WsKeys.E);
+    context.Keybinds.Unsubscribe(KeyModifiers.LAlt, WsKeys.R);
+    context.Keybinds.Unsubscribe(KeyModifiers.LAlt | KeyModifiers.LShift, WsKeys.W);
+    context.Keybinds.Unsubscribe(KeyModifiers.LAlt | KeyModifiers.LShift, WsKeys.E);
+    context.Keybinds.Unsubscribe(KeyModifiers.LAlt | KeyModifiers.LShift, WsKeys.R);
     context.Keybinds.Unsubscribe(KeyModifiers.LAlt | KeyModifiers.LShift, WsKeys.Q);
     context.Keybinds.Subscribe(KeyModifiers.LControl, CodexLayoutSettings.ToggleLayoutKey, () => ToggleCodexLayout(context), "toggle Codex layout");
     context.Keybinds.Subscribe(KeyModifiers.RControl, CodexLayoutSettings.ToggleLayoutKey, () => ToggleCodexLayout(context), "toggle Codex layout");

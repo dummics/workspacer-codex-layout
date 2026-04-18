@@ -12,6 +12,9 @@ $createdNew = $false
 $mutex = New-Object System.Threading.Mutex($true, $mutexName, [ref]$createdNew)
 
 if (-not $createdNew) {
+    $supervisorLogPath = Join-Path (Split-Path -Parent $PSScriptRoot) '.config\workspacer\supervisor.log'
+    $timestamp = Get-Date -Format o
+    "$timestamp pid=$PID supervisor-skip reason=mutex-held" | Add-Content -Path $supervisorLogPath
     return
 }
 
