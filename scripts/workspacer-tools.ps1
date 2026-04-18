@@ -1,6 +1,8 @@
 Set-StrictMode -Version Latest
 
 $script:WorkspacerSystemRoot = Split-Path -Parent $PSScriptRoot
+$script:WorkspacerConfigRoot = $script:WorkspacerSystemRoot
+$script:WorkspacerConfigEnvironmentVariableName = 'WORKSPACER_CONFIG'
 $script:WorkspacerRepoConfigPath = Join-Path $script:WorkspacerSystemRoot '.config\workspacer\workspacer.config.csx'
 $script:WorkspacerLegacyConfigPath = Join-Path $HOME '.workspacer\workspacer.config.csx'
 $script:WorkspacerSourceInstallDir = if ([string]::IsNullOrWhiteSpace($env:WORKSPACER_SOURCE_DIR)) {
@@ -26,6 +28,73 @@ $script:WorkspacerWatcherFixScriptPath = Join-Path $PSScriptRoot 'install-worksp
 $script:WorkspacerEnsureLogPath = Join-Path $script:WorkspacerSystemRoot '.config\workspacer\ensure-workspacer.log'
 $script:WorkspacerTaskName = 'Workspacer Ensure Codex Layout'
 $script:WorkspacerStartupShortcutPath = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup\workspacer.lnk'
+
+function Get-WorkspacerConfigRootStatus {
+    $currentProcessValue = [Environment]::GetEnvironmentVariable($script:WorkspacerConfigEnvironmentVariableName, 'Process')
+    $currentUserValue = [Environment]::GetEnvironmentVariable($script:WorkspacerConfigEnvironmentVariableName, 'User')
+
+    [pscustomobject]@{
+        ConfigRoot = $script:WorkspacerConfigRoot
+        ProcessValue = $currentProcessValue
+        UserValue = $currentUserValue
+        Matches = $currentProcessValue -eq $script:WorkspacerConfigRoot -and $currentUserValue -eq $script:WorkspacerConfigRoot
+    }
+}
+
+function Ensure-WorkspacerConfigRoot {
+    $changed = $false
+    $currentProcessValue = [Environment]::GetEnvironmentVariable($script:WorkspacerConfigEnvironmentVariableName, 'Process')
+    if ($currentProcessValue -ne $script:WorkspacerConfigRoot) {
+        [Environment]::SetEnvironmentVariable($script:WorkspacerConfigEnvironmentVariableName, $script:WorkspacerConfigRoot, 'Process')
+        $changed = $true
+    }
+
+    $currentUserValue = [Environment]::GetEnvironmentVariable($script:WorkspacerConfigEnvironmentVariableName, 'User')
+    if ($currentUserValue -ne $script:WorkspacerConfigRoot) {
+        [Environment]::SetEnvironmentVariable($script:WorkspacerConfigEnvironmentVariableName, $script:WorkspacerConfigRoot, 'User')
+        $changed = $true
+    }
+
+    [pscustomobject]@{
+        ConfigRoot = $script:WorkspacerConfigRoot
+        Changed = $changed
+    }
+}
+
+function Ensure-WorkspacerSourceInstalled {
+    if (Test-Path $script:WorkspacerSourceInstallDir) {
+        return $script:WorkspacerSourceInstallDir
+    }
+
+    $winget = Get-Command winget.exe -ErrorAction SilentlyContinue
+    if (-not $winget) {
+        throw "Workspacer non trovato in $script:WorkspacerSourceInstallDir e winget.exe non disponibile."
+    }
+
+    & $winget.Source `
+        install `
+        --id=rickbutton.workspacer `
+        -e `
+        --accept-package-agreements `
+        --accept-source-agreements | Out-Host
+
+    if ($LASTEXITCODE -ne 0) {
+        throw "Installazione Workspacer via winget fallita. ExitCode=$LASTEXITCODE"
+    }
+
+    if (-not (Test-Path $script:WorkspacerSourceInstallDir)) {
+        $installedCommand = Get-Command workspacer.exe -ErrorAction SilentlyContinue
+        if ($installedCommand -and $installedCommand.Source) {
+            $script:WorkspacerSourceInstallDir = Split-Path -Parent $installedCommand.Source
+        }
+    }
+
+    if (-not (Test-Path $script:WorkspacerSourceInstallDir)) {
+        throw "Workspacer risulta installato ma il path sorgente non e' stato risolto automaticamente."
+    }
+
+    return $script:WorkspacerSourceInstallDir
+}
 
 function Sync-WorkspacerConfigMirror {
     if (-not (Test-Path $script:WorkspacerRepoConfigPath)) {
@@ -94,6 +163,7 @@ function Get-WorkspacerTasks {
 }
 
 function Install-WorkspacerWatcherFix {
+    Ensure-WorkspacerSourceInstalled | Out-Null
     & $script:WorkspacerWatcherFixScriptPath -SourceDirectory $script:WorkspacerSourceInstallDir -TargetDirectory $script:WorkspacerRuntimeInstallDir
 }
 
@@ -142,6 +212,7 @@ function Start-WorkspacerSupervisor {
         return $supervisor
     }
 
+    Ensure-WorkspacerConfigRoot | Out-Null
     Ensure-WorkspacerWatcherPatched
     Sync-WorkspacerConfigMirror
     Update-WorkspacerStartupShortcut
@@ -218,6 +289,7 @@ function Get-WorkspacerHealth {
 }
 
 function Get-WorkspacerStatus {
+    $configRoot = Get-WorkspacerConfigRootStatus
     $health = Get-WorkspacerHealth
     $process = $health.MainProcess
     $watcherProcess = $health.WatcherProcess
@@ -231,6 +303,10 @@ function Get-WorkspacerStatus {
         SourceInstallDir = $script:WorkspacerSourceInstallDir
         RuntimeInstallDir = $script:WorkspacerRuntimeInstallDir
         ExePath = $script:WorkspacerExePath
+        ConfigRoot = $configRoot.ConfigRoot
+        ConfigRootMatches = $configRoot.Matches
+        ConfigRootProcessValue = $configRoot.ProcessValue
+        ConfigRootUserValue = $configRoot.UserValue
         Health = $health.Reason
         SupervisorRunning = $null -ne $supervisor
         SupervisorProcessId = if ($supervisor) { $supervisor.ProcessId } else { $null }
@@ -247,6 +323,56 @@ function Get-WorkspacerStatus {
         EnsureTaskState = if ($task) { $task.State } else { $null }
         EnsureLogPath = $script:WorkspacerEnsureLogPath
     }
+}
+
+function Install-WorkspacerSystem {
+    Ensure-WorkspacerConfigRoot | Out-Null
+    Ensure-WorkspacerSourceInstalled | Out-Null
+    Install-WorkspacerWatcherFix | Out-Null
+    Update-WorkspacerStartupShortcut
+    Register-WorkspacerHardening | Out-Null
+    Start-WorkspacerManaged | Out-Null
+    Start-Sleep -Seconds 2
+    Get-WorkspacerStatus
+}
+
+function Update-WorkspacerSystemFromGit {
+    $git = Get-Command git.exe -ErrorAction SilentlyContinue
+    if (-not $git) {
+        throw "git.exe non disponibile. Installa Git prima di usare self-update."
+    }
+
+    $insideWorkTree = & $git.Source -C $script:WorkspacerSystemRoot rev-parse --is-inside-work-tree 2>$null
+    if ($LASTEXITCODE -ne 0 -or $insideWorkTree.Trim() -ne 'true') {
+        throw "La cartella $script:WorkspacerSystemRoot non risulta un repository Git valido."
+    }
+
+    $dirty = & $git.Source -C $script:WorkspacerSystemRoot status --porcelain
+    if ($LASTEXITCODE -ne 0) {
+        throw "Impossibile leggere lo stato Git del repository installato."
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace(($dirty -join '').Trim())) {
+        throw "Il repository installato ha modifiche locali. Pulisci o committa prima di usare self-update."
+    }
+
+    & $git.Source -C $script:WorkspacerSystemRoot fetch origin main --prune | Out-Host
+    if ($LASTEXITCODE -ne 0) {
+        throw "Fetch remoto fallito durante self-update."
+    }
+
+    & $git.Source -C $script:WorkspacerSystemRoot pull --ff-only origin main | Out-Host
+    if ($LASTEXITCODE -ne 0) {
+        throw "Pull fast-forward fallito durante self-update."
+    }
+
+    $installerPath = Join-Path $script:WorkspacerSystemRoot 'scripts\install-workspacer-system.ps1'
+    & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $installerPath | Out-Host
+    if ($LASTEXITCODE -ne 0) {
+        throw "Reinstall fallito dopo il self-update. ExitCode=$LASTEXITCODE"
+    }
+
+    Get-WorkspacerStatus
 }
 
 function Start-WorkspacerManaged {
@@ -297,7 +423,7 @@ function Register-WorkspacerHardening {
     $rootFolder = $service.GetFolder('\')
     $task = $service.NewTask(0)
 
-    $task.RegistrationInfo.Description = 'Ensures Workspacer is running for the Codex layout on logon, workstation unlock, and periodic safety checks.'
+    $task.RegistrationInfo.Description = 'Ensures Workspacer is running for the Codex layout on logon, workstation unlock, and sparse safety checks.'
     $task.Settings.Enabled = $true
     $task.Settings.StartWhenAvailable = $true
     $task.Settings.AllowDemandStart = $true
@@ -325,7 +451,7 @@ function Register-WorkspacerHardening {
     $heartbeatTrigger.Enabled = $true
     $heartbeatTrigger.StartBoundary = (Get-Date).ToString("yyyy-MM-dd'T'HH:mm:ss")
     $heartbeatTrigger.DaysInterval = 1
-    $heartbeatTrigger.Repetition.Interval = 'PT5M'
+    $heartbeatTrigger.Repetition.Interval = 'PT15M'
     $heartbeatTrigger.Repetition.Duration = 'P1D'
     $heartbeatTrigger.Repetition.StopAtDurationEnd = $false
 
@@ -355,6 +481,8 @@ Uso:
   wsp <comando>
 
 Comandi essenziali:
+  install             Setup completo out-of-the-box del runtime Codex.
+  self-update         Aggiorna il repo installato via Git e riallinea il runtime.
   status              Mostra stato, health e percorsi runtime/config.
   start               Avvia Workspacer tramite supervisor.
   stop                Ferma processo Workspacer e watcher.
@@ -379,7 +507,7 @@ Note compatibilita':
 function global:wsp {
     param(
         [Parameter(Position = 0)]
-        [ValidateSet('help', '-h', '--help', '/?', 'status', 'start', 'stop', 'restart', 'recover', 'hardening-install', 'hardening-remove', 'install-hardening', 'remove-hardening', 'tasks', 'watcher-fix', 'watcher-restore', 'startup-refresh', 'supervisor-status', 'supervisor-restart')]
+        [ValidateSet('help', '-h', '--help', '/?', 'install', 'self-update', 'status', 'start', 'stop', 'restart', 'recover', 'hardening-install', 'hardening-remove', 'install-hardening', 'remove-hardening', 'tasks', 'watcher-fix', 'watcher-restore', 'startup-refresh', 'supervisor-status', 'supervisor-restart')]
         [string]$Action = 'status'
     )
 
@@ -388,6 +516,8 @@ function global:wsp {
         '-h' { Show-WorkspacerHelp }
         '--help' { Show-WorkspacerHelp }
         '/?' { Show-WorkspacerHelp }
+        'install' { Install-WorkspacerSystem | Format-List }
+        'self-update' { Update-WorkspacerSystemFromGit | Format-List }
         'status' { Get-WorkspacerStatus | Format-List }
         'start' { Start-WorkspacerManaged | Format-List Id, ProcessName, StartTime }
         'stop' { Stop-WorkspacerManaged }
@@ -407,6 +537,8 @@ function global:wsp {
 }
 
 function global:wsp-help { wsp help }
+function global:wsp-install { wsp install }
+function global:wsp-self-update { wsp self-update }
 function global:wsp-status { wsp status }
 function global:wsp-start { wsp start }
 function global:wsp-stop { wsp stop }

@@ -14,6 +14,8 @@ internal static class Program
     };
     private static readonly object LogSync = new();
     private static readonly string LogPath = ResolveLogPath();
+    private static readonly bool IsManagedRuntime =
+        string.Equals(Environment.GetEnvironmentVariable("WORKSPACER_CODEX_MANAGED"), "1", StringComparison.Ordinal);
 
     private static bool _consoleVisible;
     private static bool _isRunning = true;
@@ -72,7 +74,7 @@ internal static class Program
                         WriteLog("action=restart");
                         _isRunning = false;
                         CleanupWindowHandles(activeHandles);
-                        RestartWorkspacer();
+                        HandleManagedRestart();
                         break;
                     case LauncherAction.RestartWithMessage:
                         WriteLog($"action=restart-with-message message={Sanitize(response.Message)}");
@@ -162,8 +164,27 @@ internal static class Program
         Application.Exit();
     }
 
+    private static void HandleManagedRestart()
+    {
+        if (IsManagedRuntime)
+        {
+            WriteLog("managed-runtime restart deferred-to-supervisor");
+            Application.Exit();
+            return;
+        }
+
+        RestartWorkspacer();
+    }
+
     private static void ShowRestartNotice(string message)
     {
+        if (IsManagedRuntime)
+        {
+            WriteLog($"managed-runtime restart-notice-suppressed message={Sanitize(message)}");
+            HandleManagedRestart();
+            return;
+        }
+
         MessageBox.Show(
             message,
             "workspacer",
@@ -176,6 +197,17 @@ internal static class Program
     private static void ShowFatalError(string messageTitle, string messageBody, bool allowRestart)
     {
         WriteLog($"fatal-error title={Sanitize(messageTitle)} allowRestart={allowRestart} body={Sanitize(messageBody)}");
+        if (IsManagedRuntime)
+        {
+            if (allowRestart)
+            {
+                WriteLog("managed-runtime fatal-error deferred-to-supervisor");
+            }
+
+            Application.Exit();
+            return;
+        }
+
         if (allowRestart)
         {
             var result = MessageBox.Show(
@@ -243,7 +275,12 @@ internal static class Program
 
     private static string ResolveLogPath()
     {
-        var root = Environment.GetEnvironmentVariable("WORKSPACER_CONFIG", EnvironmentVariableTarget.User);
+        var root = Environment.GetEnvironmentVariable("WORKSPACER_CONFIG");
+        if (string.IsNullOrWhiteSpace(root))
+        {
+            root = Environment.GetEnvironmentVariable("WORKSPACER_CONFIG", EnvironmentVariableTarget.User);
+        }
+
         if (!string.IsNullOrWhiteSpace(root))
         {
             return Path.Combine(root, ".config", "workspacer", "watcher-shim.log");
