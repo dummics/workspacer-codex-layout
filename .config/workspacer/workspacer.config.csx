@@ -908,18 +908,10 @@ Action<IConfigContext> doConfig = (context) =>
     context.WindowRouter.AddFilter(CodexLayoutHelpers.IsOfficialCodexWindow);
     context.WindowRouter.AddRoute(window => CodexLayoutHelpers.IsOfficialCodexWindow(window) ? CodexLayoutHelpers.GetWorkspaceForWindow(context, window) : null);
 
-    context.Keybinds.Unsubscribe(KeyModifiers.LAlt, WsKeys.Escape);
-    context.Keybinds.Unsubscribe(KeyModifiers.LAlt, WsKeys.T);
-    context.Keybinds.Unsubscribe(KeyModifiers.LAlt, WsKeys.Q);
-    context.Keybinds.Unsubscribe(KeyModifiers.LAlt, WsKeys.Left);
-    context.Keybinds.Unsubscribe(KeyModifiers.LAlt, WsKeys.Right);
-    context.Keybinds.Unsubscribe(KeyModifiers.LAlt, WsKeys.W);
-    context.Keybinds.Unsubscribe(KeyModifiers.LAlt, WsKeys.E);
-    context.Keybinds.Unsubscribe(KeyModifiers.LAlt, WsKeys.R);
-    context.Keybinds.Unsubscribe(KeyModifiers.LAlt | KeyModifiers.LShift, WsKeys.W);
-    context.Keybinds.Unsubscribe(KeyModifiers.LAlt | KeyModifiers.LShift, WsKeys.E);
-    context.Keybinds.Unsubscribe(KeyModifiers.LAlt | KeyModifiers.LShift, WsKeys.R);
-    context.Keybinds.Unsubscribe(KeyModifiers.LAlt | KeyModifiers.LShift, WsKeys.Q);
+    // Workspacer registers a large set of global Alt-based defaults in the keybind manager
+    // constructor. For this Codex-only setup we want a single explicit hotkey and no
+    // background mouse/key behavior that can trigger unrelated upstream paths.
+    context.Keybinds.UnsubscribeAll();
     context.Keybinds.Subscribe(KeyModifiers.LControl, CodexLayoutSettings.ToggleLayoutKey, () => ToggleCodexLayout(context), "toggle Codex layout");
     context.Keybinds.Subscribe(KeyModifiers.RControl, CodexLayoutSettings.ToggleLayoutKey, () => ToggleCodexLayout(context), "toggle Codex layout");
 
