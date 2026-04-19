@@ -7,7 +7,7 @@ Set fso = CreateObject("Scripting.FileSystemObject")
 
 scriptDir = fso.GetParentFolderName(WScript.ScriptFullName)
 repoRoot = fso.GetParentFolderName(scriptDir)
-ps1Path = fso.BuildPath(scriptDir, "start-workspacer-supervisor.ps1")
+ps1Path = fso.BuildPath(scriptDir, "workspacer-supervisor.ps1")
 command = "powershell.exe -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File """ & ps1Path & """"
 
 Set processService = GetObject("winmgmts:\\.\root\cimv2")

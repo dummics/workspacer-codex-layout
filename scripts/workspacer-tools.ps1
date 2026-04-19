@@ -217,13 +217,9 @@ function Start-WorkspacerSupervisor {
     Sync-WorkspacerConfigMirror
     Update-WorkspacerStartupShortcut
 
-    $process = Start-Process -FilePath 'powershell.exe' `
+    $process = Start-Process -FilePath 'wscript.exe' `
         -ArgumentList @(
-            '-NoLogo',
-            '-NoProfile',
-            '-WindowStyle', 'Hidden',
-            '-ExecutionPolicy', 'Bypass',
-            '-File', $script:WorkspacerSupervisorScriptPath
+            $script:WorkspacerSupervisorStarterVbsPath
         ) `
         -WorkingDirectory $script:WorkspacerSystemRoot `
         -PassThru
@@ -389,13 +385,21 @@ function Stop-WorkspacerManaged {
 }
 
 function Restart-WorkspacerManaged {
-    Stop-WorkspacerManaged
-    Start-Sleep -Milliseconds 700
-    Start-WorkspacerManaged
+    Restart-WorkspacerSupervisor | Out-Null
+    Start-Sleep -Seconds 2
+    return Get-WorkspacerManagedProcessInfo
 }
 
 function Invoke-WorkspacerRecovery {
-    $supervisor = Start-WorkspacerSupervisor
+    $health = Get-WorkspacerHealth
+
+    $supervisor = if ($health.RecommendedAction -eq 'restart' -and $health.SupervisorRunning) {
+        Restart-WorkspacerSupervisor
+    }
+    else {
+        Start-WorkspacerSupervisor
+    }
+
     $health = Get-WorkspacerHealth
 
     if ($health.RecommendedAction -eq 'noop' -and $supervisor) {
