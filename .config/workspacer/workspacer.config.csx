@@ -33,6 +33,8 @@ static class CodexLayoutState
     public static readonly Dictionary<IntPtr, IWindowLocation> LastFloatingLocations = new Dictionary<IntPtr, IWindowLocation>();
     public static readonly Dictionary<IntPtr, int> LastKnownMonitorIndexes = new Dictionary<IntPtr, int>();
     public static readonly Dictionary<string, DateTime> LastLayoutCommitUtc = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+    public static readonly Dictionary<string, Dictionary<IntPtr, IWindowLocation>> LastCommittedLayoutLocationsByWorkspace =
+        new Dictionary<string, Dictionary<IntPtr, IWindowLocation>>(StringComparer.OrdinalIgnoreCase);
     public static IntPtr PreferredMainHandle = IntPtr.Zero;
     public static bool PreferredMainHandleConfirmed;
 }
@@ -410,6 +412,42 @@ static class CodexLayoutHelpers
             .Select(window => CloneLocation(window.Location))
             .ToList();
     }
+
+    public static Dictionary<IntPtr, IWindowLocation> CreateCommittedLayoutMap(
+        IEnumerable<IWindow> windows,
+        IEnumerable<IWindowLocation> locations)
+    {
+        return windows
+            .Where(window => window != null)
+            .Zip(locations, (window, location) => new
+            {
+                window.Handle,
+                Location = CloneLocation(location)
+            })
+            .ToDictionary(item => item.Handle, item => item.Location);
+    }
+
+    public static List<IWindowLocation> TryGetCommittedLayoutLocations(string workspaceName, IEnumerable<IWindow> windows)
+    {
+        if (string.IsNullOrWhiteSpace(workspaceName)
+            || windows == null
+            || !CodexLayoutState.LastCommittedLayoutLocationsByWorkspace.TryGetValue(workspaceName, out var layoutMap)
+            || layoutMap == null
+            || layoutMap.Count == 0)
+        {
+            return null;
+        }
+
+        var snapshot = windows.Where(window => window != null).ToList();
+        if (snapshot.Count == 0 || snapshot.Any(window => !layoutMap.ContainsKey(window.Handle)))
+        {
+            return null;
+        }
+
+        return snapshot
+            .Select(window => CloneLocation(layoutMap[window.Handle]))
+            .ToList();
+    }
 }
 
 class CodexColumnsLayoutEngine : ILayoutEngine
@@ -458,6 +496,7 @@ class CodexColumnsLayoutEngine : ILayoutEngine
         {
             _lastWarningWindowCount = 0;
             _lastManagedWindowCount = 0;
+            CodexLayoutState.LastCommittedLayoutLocationsByWorkspace.Remove(_workspaceName);
             return Enumerable.Empty<IWindowLocation>();
         }
 
@@ -466,7 +505,8 @@ class CodexColumnsLayoutEngine : ILayoutEngine
             && CodexLayoutState.LastLayoutCommitUtc.ContainsKey(_workspaceName))
         {
             _lastManagedWindowCount = snapshot.Count;
-            return CodexLayoutHelpers.CloneCurrentLocations(snapshot);
+            return CodexLayoutHelpers.TryGetCommittedLayoutLocations(_workspaceName, snapshot)
+                ?? CodexLayoutHelpers.CloneCurrentLocations(snapshot);
         }
 
         var shouldThrottle = isForegroundCodex
@@ -475,6 +515,7 @@ class CodexColumnsLayoutEngine : ILayoutEngine
         if (snapshot.Count == 1)
         {
             _lastWarningWindowCount = 0;
+            CodexLayoutState.LastCommittedLayoutLocationsByWorkspace.Remove(_workspaceName);
             var loneWindow = snapshot[0];
             IWindowLocation savedLocation = null;
             var shouldRestoreFloatingLocation =
@@ -503,7 +544,8 @@ class CodexColumnsLayoutEngine : ILayoutEngine
         if (shouldThrottle)
         {
             _lastManagedWindowCount = snapshot.Count;
-            return CodexLayoutHelpers.CloneCurrentLocations(snapshot);
+            return CodexLayoutHelpers.TryGetCommittedLayoutLocations(_workspaceName, snapshot)
+                ?? CodexLayoutHelpers.CloneCurrentLocations(snapshot);
         }
 
         // Never overwrite existing floating snapshots during tiling cycles.
@@ -533,6 +575,8 @@ class CodexColumnsLayoutEngine : ILayoutEngine
 
         var mappedLocations = MapLocationsToOriginalOrder(snapshot, orderedWindows, orderedLocations);
         CodexLayoutState.LastLayoutCommitUtc[_workspaceName] = DateTime.UtcNow;
+        CodexLayoutState.LastCommittedLayoutLocationsByWorkspace[_workspaceName] =
+            CodexLayoutHelpers.CreateCommittedLayoutMap(snapshot, mappedLocations);
         return mappedLocations;
     }
 
