@@ -22,6 +22,7 @@ static class CodexLayoutSettings
     public const int MaxTiledSecondaryWindows = 5;
     public const int MinimumRecommendedPrimarySpanPx = 420;
     public const int MainWindowMinimumWidthPx = 800;
+    public const int SecondaryWindowMinimumWidthPx = 260;
     public const int ActiveRelayoutThrottleMs = 120;
     public const bool DiagnosticsEnabled = false;
 
@@ -505,38 +506,40 @@ static class CodexLayoutHelpers
 
     public static bool IsManagedCodexWindow(IWindow window)
     {
-        if (!IsOfficialCodexWindow(window))
-        {
-            return false;
-        }
-
-        return !IsDuplicatePrimaryCodexWindow(window);
+        return IsOfficialCodexWindow(window);
     }
 
-    public static bool IsPrimaryCodexWindow(IWindow window)
+    public static IntPtr GetProcessMainWindowHandle(IWindow window)
     {
-        return IsOfficialCodexWindow(window)
-            && string.Equals(window.Title, "Codex", StringComparison.OrdinalIgnoreCase);
+        if (window == null)
+        {
+            return IntPtr.Zero;
+        }
+
+        NativeMethods.GetWindowThreadProcessId(window.Handle, out var processId);
+        if (processId == 0)
+        {
+            return IntPtr.Zero;
+        }
+
+        try
+        {
+            using (var process = Process.GetProcessById((int)processId))
+            {
+                return process.MainWindowHandle;
+            }
+        }
+        catch
+        {
+            return IntPtr.Zero;
+        }
     }
 
-    private static bool IsDuplicatePrimaryCodexWindow(IWindow window)
+    public static bool IsProcessMainWindow(IWindow window)
     {
-        if (!IsPrimaryCodexWindow(window)
-            || !CodexLayoutState.PreferredMainHandleConfirmed
-            || CodexLayoutState.PreferredMainHandle == IntPtr.Zero
-            || window.Handle == CodexLayoutState.PreferredMainHandle)
-        {
-            return false;
-        }
-
-        if (NativeMethods.IsWindow(CodexLayoutState.PreferredMainHandle))
-        {
-            return true;
-        }
-
-        CodexLayoutState.PreferredMainHandle = IntPtr.Zero;
-        CodexLayoutState.PreferredMainHandleConfirmed = false;
-        return false;
+        var processMainWindowHandle = GetProcessMainWindowHandle(window);
+        return processMainWindowHandle != IntPtr.Zero
+            && processMainWindowHandle == window?.Handle;
     }
 
     public static bool IsForegroundCodexWindow()
@@ -833,9 +836,9 @@ class CodexColumnsLayoutEngine : ILayoutEngine
             return _columns.CalcLayout(orderedWindows, spaceWidth, spaceHeight);
         }
 
-        var equalShare = Math.Max(1, spaceWidth / orderedWindows.Count);
-        var mainWidth = Math.Min(spaceWidth, Math.Max(CodexLayoutSettings.MainWindowMinimumWidthPx, equalShare));
         var otherCount = orderedWindows.Count - 1;
+        var equalShare = Math.Max(1, spaceWidth / orderedWindows.Count);
+        var mainWidth = GetAdaptiveMainWindowWidth(mainWindow, spaceWidth, equalShare, otherCount);
         var remainingWidth = Math.Max(0, spaceWidth - mainWidth);
         var otherWidth = otherCount > 0 ? remainingWidth / otherCount : remainingWidth;
 
@@ -856,6 +859,31 @@ class CodexColumnsLayoutEngine : ILayoutEngine
         }
 
         return locations;
+    }
+
+    private static int GetAdaptiveMainWindowWidth(IWindow mainWindow, int spaceWidth, int equalShare, int otherCount)
+    {
+        var desiredWidth = Math.Max(CodexLayoutSettings.MainWindowMinimumWidthPx, equalShare);
+
+        if (mainWindow != null
+            && CodexLayoutState.LastFloatingLocations.TryGetValue(mainWindow.Handle, out var savedLocation)
+            && savedLocation != null
+            && savedLocation.Width > 0)
+        {
+            desiredWidth = Math.Max(desiredWidth, savedLocation.Width);
+        }
+
+        if (mainWindow?.Location != null && mainWindow.Location.Width > 0)
+        {
+            desiredWidth = Math.Max(desiredWidth, mainWindow.Location.Width);
+        }
+
+        var requiredSecondaryWidth = Math.Max(0, otherCount) * CodexLayoutSettings.SecondaryWindowMinimumWidthPx;
+        var maxMainWidth = otherCount > 0
+            ? Math.Max(CodexLayoutSettings.MainWindowMinimumWidthPx, spaceWidth - requiredSecondaryWidth)
+            : spaceWidth;
+
+        return Math.Max(1, Math.Min(spaceWidth, Math.Min(desiredWidth, maxMainWidth)));
     }
 
     private bool ShouldThrottleRelayout(int throttleMs)
@@ -1017,29 +1045,51 @@ class CodexColumnsLayoutEngine : ILayoutEngine
             && CodexLayoutState.PreferredMainHandle != IntPtr.Zero)
         {
             var preferredMainWindow = windows.FirstOrDefault(window => window?.Handle == CodexLayoutState.PreferredMainHandle);
-            if (preferredMainWindow != null)
+            if (preferredMainWindow != null && CodexLayoutHelpers.IsProcessMainWindow(preferredMainWindow))
             {
                 return preferredMainWindow;
             }
 
-            if (NativeMethods.IsWindow(CodexLayoutState.PreferredMainHandle))
+            if (preferredMainWindow == null && NativeMethods.IsWindow(CodexLayoutState.PreferredMainHandle))
             {
                 return null;
             }
-            else
-            {
-                CodexLayoutState.PreferredMainHandle = IntPtr.Zero;
-                CodexLayoutState.PreferredMainHandleConfirmed = false;
-            }
+
+            CodexLayoutState.PreferredMainHandle = IntPtr.Zero;
+            CodexLayoutState.PreferredMainHandleConfirmed = false;
         }
 
-        var explicitMainWindow = windows
+        var processMainWindow = windows
+            .Where(CodexLayoutHelpers.IsManagedCodexWindow)
+            .Where(CodexLayoutHelpers.IsProcessMainWindow)
+            .OrderBy(CodexLayoutHelpers.GetWindowSequence)
+            .ThenBy(GetWindowPreferredX)
+            .FirstOrDefault();
+
+        if (processMainWindow != null)
+        {
+            CodexLayoutState.PreferredMainHandle = processMainWindow.Handle;
+            CodexLayoutState.PreferredMainHandleConfirmed = true;
+            return processMainWindow;
+        }
+
+        var explicitMainCandidates = windows
             .Where(window => CodexLayoutHelpers.IsManagedCodexWindow(window))
             .Where(window => GetExplicitMainWindowRank(window) < int.MaxValue)
             .OrderBy(GetExplicitMainWindowRank)
+            .ThenBy(CodexLayoutHelpers.GetWindowSequence)
             .ThenBy(GetWindowPreferredX)
-            .ThenBy(GetWindowPreferredY)
-            .FirstOrDefault();
+            .ToList();
+
+        var bestExplicitRank = explicitMainCandidates.Count > 0
+            ? GetExplicitMainWindowRank(explicitMainCandidates[0])
+            : int.MaxValue;
+        var explicitMainWindow = explicitMainCandidates
+            .Where(window => GetExplicitMainWindowRank(window) == bestExplicitRank)
+            .Take(2)
+            .Count() == 1
+            ? explicitMainCandidates[0]
+            : null;
 
         if (explicitMainWindow != null)
         {
@@ -1098,13 +1148,12 @@ class CodexColumnsLayoutEngine : ILayoutEngine
             return int.MaxValue;
         }
 
-        if (CodexLayoutState.PreferredMainHandleConfirmed
-            && window.Handle == CodexLayoutState.PreferredMainHandle)
+        if (CodexLayoutState.PreferredMainHandleConfirmed)
         {
-            return 0;
+            return window.Handle == CodexLayoutState.PreferredMainHandle ? 0 : int.MaxValue;
         }
 
-        return GetExplicitMainWindowRank(window);
+        return CodexLayoutHelpers.IsProcessMainWindow(window) ? 0 : int.MaxValue;
     }
 
     private static bool IsPinnedMainWindow(IWindow window)
