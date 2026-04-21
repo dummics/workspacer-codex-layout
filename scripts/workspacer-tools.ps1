@@ -19,6 +19,7 @@ else {
 }
 $script:WorkspacerExePath = Join-Path $script:WorkspacerRuntimeInstallDir 'workspacer.exe'
 $script:WorkspacerWatcherExePath = Join-Path $script:WorkspacerRuntimeInstallDir 'workspacer.Watcher.exe'
+$script:WorkspacerRuntimeAssemblyPath = Join-Path $script:WorkspacerRuntimeInstallDir 'workspacer.dll'
 $script:WorkspacerEnsureScriptPath = Join-Path $PSScriptRoot 'ensure-workspacer.ps1'
 $script:WorkspacerSupervisorScriptPath = Join-Path $PSScriptRoot 'workspacer-supervisor.ps1'
 $script:WorkspacerSupervisorStarterScriptPath = Join-Path $PSScriptRoot 'start-workspacer-supervisor.ps1'
@@ -158,6 +159,39 @@ function Get-WorkspacerWatcherBinaryInfo {
     }
 }
 
+function Get-WorkspacerRuntimePatchInfo {
+    if (-not (Test-Path $script:WorkspacerRuntimeAssemblyPath)) {
+        return $null
+    }
+
+    $ilspy = Get-Command ilspycmd.exe -ErrorAction SilentlyContinue
+    if (-not $ilspy) {
+        return [pscustomobject]@{
+            AssemblyPath = $script:WorkspacerRuntimeAssemblyPath
+            Patched = $null
+            Detection = 'ilspycmd-missing'
+        }
+    }
+
+    $il = & $ilspy.Source -il -t workspacer.KeybindManager $script:WorkspacerRuntimeAssemblyPath 2>$null
+    $constructorCallsDefaultKeybinds = $false
+    for ($index = 0; $index -lt $il.Count; $index++) {
+        if ($il[$index] -match 'SubscribeDefaults\(valuetype workspacer.KeyModifiers\)') {
+            $nearby = ($il[[Math]::Max(0, $index - 6)..[Math]::Min($il.Count - 1, $index + 2)] -join "`n")
+            if ($nearby -match '\.ctor' -or $nearby -match 'IL_005') {
+                $constructorCallsDefaultKeybinds = $true
+                break
+            }
+        }
+    }
+
+    [pscustomobject]@{
+        AssemblyPath = $script:WorkspacerRuntimeAssemblyPath
+        Patched = -not $constructorCallsDefaultKeybinds
+        Detection = 'ilspycmd'
+    }
+}
+
 function Get-WorkspacerTasks {
     Get-ScheduledTask -TaskName $script:WorkspacerTaskName -ErrorAction SilentlyContinue
 }
@@ -183,6 +217,11 @@ function Ensure-WorkspacerWatcherPatched {
     }
 
     if (-not $watcherInfo.Patched) {
+        Install-WorkspacerWatcherFix | Out-Null
+    }
+
+    $runtimePatchInfo = Get-WorkspacerRuntimePatchInfo
+    if (-not $runtimePatchInfo -or $runtimePatchInfo.Patched -ne $true) {
         Install-WorkspacerWatcherFix | Out-Null
     }
 }
@@ -290,6 +329,7 @@ function Get-WorkspacerStatus {
     $process = $health.MainProcess
     $watcherProcess = $health.WatcherProcess
     $watcherInfo = Get-WorkspacerWatcherBinaryInfo
+    $runtimePatchInfo = Get-WorkspacerRuntimePatchInfo
     $supervisor = Get-WorkspacerSupervisorProcessInfo
     $task = Get-WorkspacerTasks | Select-Object -First 1
 
@@ -311,6 +351,9 @@ function Get-WorkspacerStatus {
         WatcherExePath = if ($watcherInfo) { $watcherInfo.ExePath } else { $null }
         WatcherPatched = if ($watcherInfo) { $watcherInfo.Patched } else { $null }
         WatcherProductVersion = if ($watcherInfo) { $watcherInfo.ProductVersion } else { $null }
+        RuntimeAssemblyPath = if ($runtimePatchInfo) { $runtimePatchInfo.AssemblyPath } else { $script:WorkspacerRuntimeAssemblyPath }
+        RuntimeKeybindDefaultsPatched = if ($runtimePatchInfo) { $runtimePatchInfo.Patched } else { $null }
+        RuntimeKeybindDefaultsPatchDetection = if ($runtimePatchInfo) { $runtimePatchInfo.Detection } else { $null }
         ForeignMainCount = $health.ForeignMainCount
         ForeignWatcherCount = $health.ForeignWatcherCount
         RepoConfigPath = $script:WorkspacerRepoConfigPath
@@ -498,7 +541,7 @@ Comandi avanzati:
   hardening-remove    Rimuove la scheduled task di hardening.
   tasks               Mostra dettagli della scheduled task.
   watcher-fix         Applica patch watcher nel runtime locale.
-  watcher-restore     Ripristina watcher originale.
+  watcher-restore     Ripristina watcher e runtime originali dall'ultimo backup.
   startup-refresh     Rigenera shortcut Startup.
   supervisor-status   Mostra processo supervisor.
   supervisor-restart  Riavvia supervisor.

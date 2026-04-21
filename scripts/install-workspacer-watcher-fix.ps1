@@ -10,7 +10,9 @@ $ErrorActionPreference = 'Stop'
 $scriptDirectory = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDirectory
 $projectPath = Join-Path $repoRoot 'tools\watcher-shim\workspacer.Watcher.csproj'
+$runtimePatcherProjectPath = Join-Path $repoRoot 'tools\runtime-patcher\workspacer.RuntimePatcher.csproj'
 $artifactRoot = Join-Path $repoRoot '.artifacts\watcher-shim\publish'
+$runtimePatcherArtifactRoot = Join-Path $repoRoot '.artifacts\runtime-patcher\publish'
 $backupRoot = Join-Path $repoRoot 'backups\watcher-fix'
 $watcherFiles = @(
     'workspacer.Watcher.exe',
@@ -77,6 +79,11 @@ if ($RestoreOriginal) {
         Copy-Item -Path $sourcePath -Destination (Join-Path $TargetDirectory $fileName) -Force
     }
 
+    $runtimeAssemblyBackup = Join-Path $backupDirectory.FullName 'workspacer.dll'
+    if (Test-Path $runtimeAssemblyBackup) {
+        Copy-Item -Path $runtimeAssemblyBackup -Destination (Join-Path $TargetDirectory 'workspacer.dll') -Force
+    }
+
     Write-Host "Watcher originale ripristinato da $($backupDirectory.FullName) su $TargetDirectory"
     return
 }
@@ -85,7 +92,12 @@ if (-not (Test-Path $projectPath)) {
     throw "Project watcher shim non trovato: $projectPath"
 }
 
+if (-not (Test-Path $runtimePatcherProjectPath)) {
+    throw "Project runtime patcher non trovato: $runtimePatcherProjectPath"
+}
+
 New-Item -ItemType Directory -Path $artifactRoot -Force | Out-Null
+New-Item -ItemType Directory -Path $runtimePatcherArtifactRoot -Force | Out-Null
 New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
 
 Sync-WorkspacerRuntimeDirectory
@@ -95,6 +107,13 @@ dotnet publish $projectPath `
     -r win-x64 `
     --self-contained false `
     -o $artifactRoot `
+    /p:UseAppHost=true | Out-Host
+
+dotnet publish $runtimePatcherProjectPath `
+    -c Release `
+    -r win-x64 `
+    --self-contained false `
+    -o $runtimePatcherArtifactRoot `
     /p:UseAppHost=true | Out-Host
 
 $backupDirectory = Join-Path $backupRoot (Get-Date -Format 'yyyyMMdd-HHmmss')
@@ -118,4 +137,15 @@ foreach ($fileName in $watcherFiles) {
     Copy-Item -Path $publishedFile -Destination (Join-Path $TargetDirectory $fileName) -Force
 }
 
-Write-Host "Watcher fix installato su $TargetDirectory. Backup creato in $backupDirectory"
+$runtimePatcherExe = Join-Path $runtimePatcherArtifactRoot 'workspacer.RuntimePatcher.exe'
+$runtimeAssembly = Join-Path $TargetDirectory 'workspacer.dll'
+if (-not (Test-Path $runtimePatcherExe)) {
+    throw "Runtime patcher mancante: $runtimePatcherExe"
+}
+
+& $runtimePatcherExe --assembly $runtimeAssembly --backup-directory $backupDirectory | Out-Host
+if ($LASTEXITCODE -ne 0) {
+    throw "Runtime patcher fallito. ExitCode=$LASTEXITCODE"
+}
+
+Write-Host "Watcher fix e runtime keybind patch installati su $TargetDirectory. Backup creato in $backupDirectory"
