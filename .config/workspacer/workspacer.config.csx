@@ -29,8 +29,11 @@ static class CodexLayoutSettings
     public const int PrimaryShellMinimumProbeWidthPx = 640;
     public const int PrimaryShellMaxProbeNodes = 140;
     public const int PrimaryShellMaxProbeDepth = 12;
-    public const int ActiveRelayoutThrottleMs = 120;
-    public const bool EnableLiveManualReorder = false;
+    public const int ActiveRelayoutThrottleMs = 250;
+    public const int KeybindProfileFastCheckIntervalMs = 500;
+    public const int KeybindProfileSteadyCheckIntervalMs = 5000;
+    public const int KeybindProfileFastCheckCount = 20;
+    public const bool EnableLiveManualReorder = true;
     public const bool DiagnosticsEnabled = false;
 
     public const WsKeys ToggleLayoutKey = WsKeys.F2;
@@ -51,6 +54,7 @@ static class CodexLayoutState
     public static readonly Dictionary<IntPtr, bool> PrimaryShellWindowCache = new Dictionary<IntPtr, bool>();
     public static IntPtr PreferredMainHandle = IntPtr.Zero;
     public static bool PreferredMainHandleConfirmed;
+    public static bool MinimalKeybindEnforcerStarted;
     public static long NextWindowSequence;
 }
 
@@ -214,6 +218,9 @@ static class NativeMethods
 
     [DllImport("user32.dll")]
     public static extern bool IsWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern short GetAsyncKeyState(int virtualKeyCode);
 }
 
 static class CodexLayoutHelpers
@@ -671,6 +678,11 @@ static class CodexLayoutHelpers
         }
     }
 
+    public static bool IsLeftMouseButtonDown()
+    {
+        return (NativeMethods.GetAsyncKeyState(0x01) & unchecked((short)0x8000)) != 0;
+    }
+
     public static List<IWindowLocation> CloneCurrentLocations(IEnumerable<IWindow> windows)
     {
         return windows
@@ -810,6 +822,7 @@ class CodexColumnsLayoutEngine : ILayoutEngine
         var stableOrderedWindows = OrderWindowsForLayout(_workspaceName, snapshot, preferLiveTiledOrder: false);
         var hasManualReorderSignal = CodexLayoutSettings.EnableLiveManualReorder
             && isForegroundCodex
+            && CodexLayoutHelpers.IsLeftMouseButtonDown()
             && ShouldApplyLiveTiledOrder(_workspaceName, stableOrderedWindows);
         var orderedWindows = hasManualReorderSignal
             ? ApplyLiveTiledOrder(stableOrderedWindows)
@@ -848,7 +861,14 @@ class CodexColumnsLayoutEngine : ILayoutEngine
             ? _rows.CalcLayout(tiledWindows, spaceWidth, spaceHeight)
             : CalcLandscapeLayout(tiledWindows, spaceWidth, spaceHeight);
 
-        var mappedLocations = MapLocationsToOriginalOrder(snapshot, tiledWindows, orderedLocations);
+        var mappedLocations = MapLocationsToOriginalOrder(
+            snapshot,
+            tiledWindows,
+            orderedLocations,
+            spaceWidth,
+            spaceHeight,
+            _monitorOriginX,
+            _monitorOriginY);
         CodexLayoutState.LastLayoutCommitUtc[_workspaceName] = DateTime.UtcNow;
         CodexLayoutHelpers.SaveOrderedHandles(_workspaceName, orderedWindows);
         CodexLayoutState.LastCommittedLayoutLocationsByWorkspace[_workspaceName] =
@@ -1178,7 +1198,11 @@ class CodexColumnsLayoutEngine : ILayoutEngine
     private static IEnumerable<IWindowLocation> MapLocationsToOriginalOrder(
         List<IWindow> originalWindows,
         List<IWindow> orderedWindows,
-        IEnumerable<IWindowLocation> orderedLocations)
+        IEnumerable<IWindowLocation> orderedLocations,
+        int spaceWidth,
+        int spaceHeight,
+        int monitorOriginX,
+        int monitorOriginY)
     {
         var locationsByHandle = orderedWindows
             .Zip(orderedLocations, (window, location) => new { window.Handle, Location = location })
@@ -1187,15 +1211,33 @@ class CodexColumnsLayoutEngine : ILayoutEngine
         return originalWindows
             .Select(window => locationsByHandle.TryGetValue(window.Handle, out var location)
                 ? location
-                : GetUntiledWindowLocation(window))
+                : GetUntiledWindowLocation(window, spaceWidth, spaceHeight, monitorOriginX, monitorOriginY))
             .ToList();
     }
 
-    private static IWindowLocation GetUntiledWindowLocation(IWindow window)
+    private static IWindowLocation GetUntiledWindowLocation(
+        IWindow window,
+        int spaceWidth,
+        int spaceHeight,
+        int monitorOriginX,
+        int monitorOriginY)
     {
         if (window == null)
         {
-            return new WindowLocation(0, 0, 960, 720, WindowState.Normal);
+            return ClampToMonitor(
+                new WindowLocation(monitorOriginX, monitorOriginY, 960, 720, WindowState.Normal),
+                spaceWidth,
+                spaceHeight,
+                monitorOriginX,
+                monitorOriginY);
+        }
+
+        // Overflow windows are intentionally not tiled. Prefer the live position so
+        // moving one between monitors does not snap it back to an old off-screen hint.
+        var currentLocation = CodexLayoutHelpers.CloneLocation(window.Location);
+        if (currentLocation != null && currentLocation.Width > 0 && currentLocation.Height > 0)
+        {
+            return ClampToMonitor(currentLocation, spaceWidth, spaceHeight, monitorOriginX, monitorOriginY);
         }
 
         if (CodexLayoutState.LastFloatingLocations.TryGetValue(window.Handle, out var savedLocation)
@@ -1203,16 +1245,39 @@ class CodexColumnsLayoutEngine : ILayoutEngine
             && savedLocation.Width > 0
             && savedLocation.Height > 0)
         {
-            return CodexLayoutHelpers.CloneLocation(savedLocation);
+            return ClampToMonitor(CodexLayoutHelpers.CloneLocation(savedLocation), spaceWidth, spaceHeight, monitorOriginX, monitorOriginY);
         }
 
-        var currentLocation = CodexLayoutHelpers.CloneLocation(window.Location);
-        if (currentLocation != null && currentLocation.Width > 0 && currentLocation.Height > 0)
+        return ClampToMonitor(
+            new WindowLocation(monitorOriginX, monitorOriginY, 960, 720, WindowState.Normal),
+            spaceWidth,
+            spaceHeight,
+            monitorOriginX,
+            monitorOriginY);
+    }
+
+    private static IWindowLocation ClampToMonitor(
+        IWindowLocation location,
+        int spaceWidth,
+        int spaceHeight,
+        int monitorOriginX,
+        int monitorOriginY)
+    {
+        if (location == null || spaceWidth <= 0 || spaceHeight <= 0)
         {
-            return currentLocation;
+            return location;
         }
 
-        return new WindowLocation(0, 0, 960, 720, WindowState.Normal);
+        var width = Math.Max(120, Math.Min(location.Width, spaceWidth));
+        var height = Math.Max(120, Math.Min(location.Height, spaceHeight));
+        var minX = monitorOriginX;
+        var minY = monitorOriginY;
+        var maxX = monitorOriginX + Math.Max(0, spaceWidth - width);
+        var maxY = monitorOriginY + Math.Max(0, spaceHeight - height);
+        var x = Math.Max(minX, Math.Min(location.X, maxX));
+        var y = Math.Max(minY, Math.Min(location.Y, maxY));
+
+        return new WindowLocation(x, y, width, height, WindowState.Normal);
     }
 
     private static int GetMainWindowRank(IWindow window)
@@ -1332,6 +1397,48 @@ void ToggleCodexLayout(IConfigContext context)
 
 }
 
+void ApplyMinimalKeybindProfile(IConfigContext context)
+{
+    context.Keybinds.UnsubscribeAll();
+    context.Keybinds.Subscribe(KeyModifiers.LControl, CodexLayoutSettings.ToggleLayoutKey, () => ToggleCodexLayout(context), "toggle Codex layout");
+    context.Keybinds.Subscribe(KeyModifiers.RControl, CodexLayoutSettings.ToggleLayoutKey, () => ToggleCodexLayout(context), "toggle Codex layout");
+}
+
+void EnsureMinimalKeybindEnforcer(IConfigContext context)
+{
+    if (CodexLayoutState.MinimalKeybindEnforcerStarted)
+    {
+        return;
+    }
+
+    CodexLayoutState.MinimalKeybindEnforcerStarted = true;
+
+    var thread = new Thread(() =>
+    {
+        var attempts = 0;
+        while (true)
+        {
+            var interval = attempts < CodexLayoutSettings.KeybindProfileFastCheckCount
+                ? CodexLayoutSettings.KeybindProfileFastCheckIntervalMs
+                : CodexLayoutSettings.KeybindProfileSteadyCheckIntervalMs;
+            Thread.Sleep(interval);
+            attempts++;
+
+            try
+            {
+                ApplyMinimalKeybindProfile(context);
+            }
+            catch
+            {
+            }
+        }
+    });
+
+    thread.IsBackground = true;
+    thread.Name = "CodexMinimalKeybindEnforcer";
+    thread.Start();
+}
+
 Action<IConfigContext> doConfig = (context) =>
 {
     context.Branch = Branch.None;
@@ -1360,9 +1467,8 @@ Action<IConfigContext> doConfig = (context) =>
     // Workspacer registers a large set of global Alt-based defaults in the keybind manager
     // constructor. For this Codex-only setup we want a single explicit hotkey and no
     // background mouse/key behavior that can trigger unrelated upstream paths.
-    context.Keybinds.UnsubscribeAll();
-    context.Keybinds.Subscribe(KeyModifiers.LControl, CodexLayoutSettings.ToggleLayoutKey, () => ToggleCodexLayout(context), "toggle Codex layout");
-    context.Keybinds.Subscribe(KeyModifiers.RControl, CodexLayoutSettings.ToggleLayoutKey, () => ToggleCodexLayout(context), "toggle Codex layout");
+    ApplyMinimalKeybindProfile(context);
+    EnsureMinimalKeybindEnforcer(context);
 
     context.SystemTray.AddToContextMenu(
         "Toggle Codex layout (Ctrl+F2)",
