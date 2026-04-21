@@ -1,6 +1,8 @@
 #r "C:\Program Files\workspacer\workspacer.Shared.dll"
 #r "System.Windows.Forms"
 #r "System.Drawing"
+#r "UIAutomationClient"
+#r "UIAutomationTypes"
 
 using System;
 using System.Collections.Generic;
@@ -11,6 +13,7 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
+using System.Windows.Automation;
 using workspacer;
 using WinForms = System.Windows.Forms;
 using WsKeys = workspacer.Keys;
@@ -23,6 +26,7 @@ static class CodexLayoutSettings
     public const int MinimumRecommendedPrimarySpanPx = 420;
     public const int MainWindowMinimumWidthPx = 800;
     public const int SecondaryWindowMinimumWidthPx = 260;
+    public const int PrimaryShellNegativeCacheMs = 5000;
     public const int ActiveRelayoutThrottleMs = 120;
     public const bool DiagnosticsEnabled = false;
 
@@ -41,6 +45,8 @@ static class CodexLayoutState
     public static readonly Dictionary<string, List<IntPtr>> LastOrderedHandlesByWorkspace =
         new Dictionary<string, List<IntPtr>>(StringComparer.OrdinalIgnoreCase);
     public static readonly List<IntPtr> GlobalOrderedHandles = new List<IntPtr>();
+    public static readonly Dictionary<IntPtr, bool> PrimaryShellWindowCache = new Dictionary<IntPtr, bool>();
+    public static readonly Dictionary<IntPtr, DateTime> PrimaryShellWindowCacheUtc = new Dictionary<IntPtr, DateTime>();
     public static IntPtr PreferredMainHandle = IntPtr.Zero;
     public static bool PreferredMainHandleConfirmed;
     public static long NextWindowSequence;
@@ -509,38 +515,67 @@ static class CodexLayoutHelpers
         return IsOfficialCodexWindow(window);
     }
 
-    public static IntPtr GetProcessMainWindowHandle(IWindow window)
+    public static bool IsPrimaryShellWindow(IWindow window)
     {
-        if (window == null)
+        if (!IsOfficialCodexWindow(window))
         {
-            return IntPtr.Zero;
+            return false;
         }
 
-        NativeMethods.GetWindowThreadProcessId(window.Handle, out var processId);
-        if (processId == 0)
+        var now = DateTime.UtcNow;
+        if (CodexLayoutState.PrimaryShellWindowCache.TryGetValue(window.Handle, out var cachedResult)
+            && CodexLayoutState.PrimaryShellWindowCacheUtc.TryGetValue(window.Handle, out var cachedAt)
+            && (cachedResult || (now - cachedAt).TotalMilliseconds < CodexLayoutSettings.PrimaryShellNegativeCacheMs))
         {
-            return IntPtr.Zero;
+            return cachedResult;
+        }
+
+        var detected = TryDetectPrimaryShellWindow(window.Handle);
+        CodexLayoutState.PrimaryShellWindowCache[window.Handle] = detected;
+        CodexLayoutState.PrimaryShellWindowCacheUtc[window.Handle] = now;
+        return detected;
+    }
+
+    private static bool TryDetectPrimaryShellWindow(IntPtr handle)
+    {
+        if (handle == IntPtr.Zero)
+        {
+            return false;
         }
 
         try
         {
-            using (var process = Process.GetProcessById((int)processId))
+            var root = AutomationElement.FromHandle(handle);
+            if (root == null)
             {
-                return process.MainWindowHandle;
+                return false;
+            }
+
+            foreach (var marker in PrimaryShellMarkers)
+            {
+                var match = root.FindFirst(
+                    TreeScope.Descendants,
+                    new PropertyCondition(AutomationElement.NameProperty, marker));
+                if (match != null)
+                {
+                    return true;
+                }
             }
         }
         catch
         {
-            return IntPtr.Zero;
         }
+
+        return false;
     }
 
-    public static bool IsProcessMainWindow(IWindow window)
+    private static readonly string[] PrimaryShellMarkers =
     {
-        var processMainWindowHandle = GetProcessMainWindowHandle(window);
-        return processMainWindowHandle != IntPtr.Zero
-            && processMainWindowHandle == window?.Handle;
-    }
+        "Nascondi barra laterale",
+        "Mostra barra laterale",
+        "Hide sidebar",
+        "Show sidebar"
+    };
 
     public static bool IsForegroundCodexWindow()
     {
@@ -1022,7 +1057,15 @@ class CodexColumnsLayoutEngine : ILayoutEngine
         var mainWindow = orderedWindows.FirstOrDefault(IsPinnedMainWindow);
         if (mainWindow == null)
         {
-            return orderedWindows
+            var candidates = orderedWindows.AsEnumerable();
+            if (CodexLayoutState.PreferredMainHandleConfirmed
+                && CodexLayoutState.PreferredMainHandle != IntPtr.Zero
+                && NativeMethods.IsWindow(CodexLayoutState.PreferredMainHandle))
+            {
+                candidates = candidates.Where(window => !CodexLayoutHelpers.IsPrimaryShellWindow(window));
+            }
+
+            return candidates
                 .Take(CodexLayoutSettings.MaxTiledSecondaryWindows + 1)
                 .ToList();
         }
@@ -1030,6 +1073,7 @@ class CodexColumnsLayoutEngine : ILayoutEngine
         return new[] { mainWindow }
             .Concat(orderedWindows
                 .Where(window => window != mainWindow)
+                .Where(window => !CodexLayoutHelpers.IsPrimaryShellWindow(window))
                 .Take(CodexLayoutSettings.MaxTiledSecondaryWindows))
             .ToList();
     }
@@ -1045,7 +1089,7 @@ class CodexColumnsLayoutEngine : ILayoutEngine
             && CodexLayoutState.PreferredMainHandle != IntPtr.Zero)
         {
             var preferredMainWindow = windows.FirstOrDefault(window => window?.Handle == CodexLayoutState.PreferredMainHandle);
-            if (preferredMainWindow != null && CodexLayoutHelpers.IsProcessMainWindow(preferredMainWindow))
+            if (preferredMainWindow != null && CodexLayoutHelpers.IsPrimaryShellWindow(preferredMainWindow))
             {
                 return preferredMainWindow;
             }
@@ -1059,43 +1103,19 @@ class CodexColumnsLayoutEngine : ILayoutEngine
             CodexLayoutState.PreferredMainHandleConfirmed = false;
         }
 
-        var processMainWindow = windows
+        var primaryShellWindow = windows
             .Where(CodexLayoutHelpers.IsManagedCodexWindow)
-            .Where(CodexLayoutHelpers.IsProcessMainWindow)
-            .OrderBy(CodexLayoutHelpers.GetWindowSequence)
-            .ThenBy(GetWindowPreferredX)
+            .Where(CodexLayoutHelpers.IsPrimaryShellWindow)
+            .OrderBy(GetWindowPreferredX)
+            .ThenBy(GetWindowPreferredY)
+            .ThenBy(CodexLayoutHelpers.GetWindowSequence)
             .FirstOrDefault();
 
-        if (processMainWindow != null)
+        if (primaryShellWindow != null)
         {
-            CodexLayoutState.PreferredMainHandle = processMainWindow.Handle;
+            CodexLayoutState.PreferredMainHandle = primaryShellWindow.Handle;
             CodexLayoutState.PreferredMainHandleConfirmed = true;
-            return processMainWindow;
-        }
-
-        var explicitMainCandidates = windows
-            .Where(window => CodexLayoutHelpers.IsManagedCodexWindow(window))
-            .Where(window => GetExplicitMainWindowRank(window) < int.MaxValue)
-            .OrderBy(GetExplicitMainWindowRank)
-            .ThenBy(CodexLayoutHelpers.GetWindowSequence)
-            .ThenBy(GetWindowPreferredX)
-            .ToList();
-
-        var bestExplicitRank = explicitMainCandidates.Count > 0
-            ? GetExplicitMainWindowRank(explicitMainCandidates[0])
-            : int.MaxValue;
-        var explicitMainWindow = explicitMainCandidates
-            .Where(window => GetExplicitMainWindowRank(window) == bestExplicitRank)
-            .Take(2)
-            .Count() == 1
-            ? explicitMainCandidates[0]
-            : null;
-
-        if (explicitMainWindow != null)
-        {
-            CodexLayoutState.PreferredMainHandle = explicitMainWindow.Handle;
-            CodexLayoutState.PreferredMainHandleConfirmed = true;
-            return explicitMainWindow;
+            return primaryShellWindow;
         }
 
         return null;
@@ -1153,7 +1173,7 @@ class CodexColumnsLayoutEngine : ILayoutEngine
             return window.Handle == CodexLayoutState.PreferredMainHandle ? 0 : int.MaxValue;
         }
 
-        return CodexLayoutHelpers.IsProcessMainWindow(window) ? 0 : int.MaxValue;
+        return CodexLayoutHelpers.IsPrimaryShellWindow(window) ? 0 : int.MaxValue;
     }
 
     private static bool IsPinnedMainWindow(IWindow window)
