@@ -26,7 +26,9 @@ static class CodexLayoutSettings
     public const int MinimumRecommendedPrimarySpanPx = 420;
     public const int MainWindowMinimumWidthPx = 800;
     public const int SecondaryWindowMinimumWidthPx = 260;
-    public const int PrimaryShellNegativeCacheMs = 5000;
+    public const int PrimaryShellMinimumProbeWidthPx = 640;
+    public const int PrimaryShellMaxProbeNodes = 140;
+    public const int PrimaryShellMaxProbeDepth = 12;
     public const int ActiveRelayoutThrottleMs = 120;
     public const bool DiagnosticsEnabled = false;
 
@@ -46,7 +48,6 @@ static class CodexLayoutState
         new Dictionary<string, List<IntPtr>>(StringComparer.OrdinalIgnoreCase);
     public static readonly List<IntPtr> GlobalOrderedHandles = new List<IntPtr>();
     public static readonly Dictionary<IntPtr, bool> PrimaryShellWindowCache = new Dictionary<IntPtr, bool>();
-    public static readonly Dictionary<IntPtr, DateTime> PrimaryShellWindowCacheUtc = new Dictionary<IntPtr, DateTime>();
     public static IntPtr PreferredMainHandle = IntPtr.Zero;
     public static bool PreferredMainHandleConfirmed;
     public static long NextWindowSequence;
@@ -522,17 +523,22 @@ static class CodexLayoutHelpers
             return false;
         }
 
-        var now = DateTime.UtcNow;
-        if (CodexLayoutState.PrimaryShellWindowCache.TryGetValue(window.Handle, out var cachedResult)
-            && CodexLayoutState.PrimaryShellWindowCacheUtc.TryGetValue(window.Handle, out var cachedAt)
-            && (cachedResult || (now - cachedAt).TotalMilliseconds < CodexLayoutSettings.PrimaryShellNegativeCacheMs))
+        if (CodexLayoutState.PrimaryShellWindowCache.TryGetValue(window.Handle, out var cachedResult))
         {
             return cachedResult;
         }
 
+        // Avoid probing normal tiled thread windows. UI Automation can block Chromium/Electron
+        // when a window is activating or still rendering, so only probe plausible shell windows
+        // and cache both true and false forever for the lifetime of the handle.
+        if (window.Location == null
+            || window.Location.Width < CodexLayoutSettings.PrimaryShellMinimumProbeWidthPx)
+        {
+            return false;
+        }
+
         var detected = TryDetectPrimaryShellWindow(window.Handle);
         CodexLayoutState.PrimaryShellWindowCache[window.Handle] = detected;
-        CodexLayoutState.PrimaryShellWindowCacheUtc[window.Handle] = now;
         return detected;
     }
 
@@ -551,14 +557,60 @@ static class CodexLayoutHelpers
                 return false;
             }
 
-            foreach (var marker in PrimaryShellMarkers)
+            var walker = TreeWalker.ControlViewWalker;
+            var queue = new Queue<Tuple<AutomationElement, int>>();
+            queue.Enqueue(Tuple.Create(root, 0));
+            var visited = 0;
+
+            while (queue.Count > 0 && visited < CodexLayoutSettings.PrimaryShellMaxProbeNodes)
             {
-                var match = root.FindFirst(
-                    TreeScope.Descendants,
-                    new PropertyCondition(AutomationElement.NameProperty, marker));
-                if (match != null)
+                var item = queue.Dequeue();
+                var element = item.Item1;
+                var depth = item.Item2;
+                visited++;
+
+                string name = null;
+                try
+                {
+                    name = element.Current.Name;
+                }
+                catch
+                {
+                }
+
+                if (!string.IsNullOrWhiteSpace(name)
+                    && PrimaryShellMarkers.Any(marker => string.Equals(name, marker, StringComparison.OrdinalIgnoreCase)))
                 {
                     return true;
+                }
+
+                if (depth >= CodexLayoutSettings.PrimaryShellMaxProbeDepth)
+                {
+                    continue;
+                }
+
+                AutomationElement child = null;
+                try
+                {
+                    child = walker.GetFirstChild(element);
+                }
+                catch
+                {
+                    child = null;
+                }
+
+                while (child != null && visited + queue.Count < CodexLayoutSettings.PrimaryShellMaxProbeNodes)
+                {
+                    queue.Enqueue(Tuple.Create(child, depth + 1));
+
+                    try
+                    {
+                        child = walker.GetNextSibling(child);
+                    }
+                    catch
+                    {
+                        child = null;
+                    }
                 }
             }
         }
@@ -1057,15 +1109,7 @@ class CodexColumnsLayoutEngine : ILayoutEngine
         var mainWindow = orderedWindows.FirstOrDefault(IsPinnedMainWindow);
         if (mainWindow == null)
         {
-            var candidates = orderedWindows.AsEnumerable();
-            if (CodexLayoutState.PreferredMainHandleConfirmed
-                && CodexLayoutState.PreferredMainHandle != IntPtr.Zero
-                && NativeMethods.IsWindow(CodexLayoutState.PreferredMainHandle))
-            {
-                candidates = candidates.Where(window => !CodexLayoutHelpers.IsPrimaryShellWindow(window));
-            }
-
-            return candidates
+            return orderedWindows
                 .Take(CodexLayoutSettings.MaxTiledSecondaryWindows + 1)
                 .ToList();
         }
