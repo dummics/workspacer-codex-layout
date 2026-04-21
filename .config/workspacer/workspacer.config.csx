@@ -670,7 +670,13 @@ class CodexColumnsLayoutEngine : ILayoutEngine
             return Enumerable.Empty<IWindowLocation>();
         }
 
-        if (shouldThrottle)
+        var stableOrderedWindows = OrderWindowsForLayout(_workspaceName, snapshot, preferLiveTiledOrder: false);
+        var hasManualReorderSignal = isForegroundCodex && ShouldApplyLiveTiledOrder(_workspaceName, stableOrderedWindows);
+        var orderedWindows = hasManualReorderSignal
+            ? ApplyLiveTiledOrder(stableOrderedWindows)
+            : stableOrderedWindows;
+
+        if (shouldThrottle && !hasManualReorderSignal)
         {
             _lastManagedWindowCount = snapshot.Count;
             return CodexLayoutHelpers.TryGetCommittedLayoutLocations(_workspaceName, snapshot)
@@ -681,7 +687,6 @@ class CodexColumnsLayoutEngine : ILayoutEngine
         // This avoids replacing user positioning hints with transient tile coordinates.
         CodexLayoutHelpers.RememberFloatingLocations(snapshot, overwrite: false);
 
-        var orderedWindows = OrderWindowsForLayout(_workspaceName, snapshot);
         var tiledWindows = SelectTiledWindows(orderedWindows);
         var useRows = spaceHeight > spaceWidth;
         var tiledWindowCount = Math.Max(1, tiledWindows.Count);
@@ -829,19 +834,24 @@ class CodexColumnsLayoutEngine : ILayoutEngine
         return (DateTime.UtcNow - lastCommitUtc).TotalMilliseconds < throttleMs;
     }
 
-    private static List<IWindow> OrderWindowsForLayout(string workspaceName, List<IWindow> windows)
+    private static List<IWindow> OrderWindowsForLayout(string workspaceName, List<IWindow> windows, bool preferLiveTiledOrder)
     {
         var mainWindow = GetPinnedMainWindow(windows);
+        List<IWindow> orderedWindows;
 
         if (mainWindow == null)
         {
-            return windows
+            orderedWindows = windows
                 .OrderBy(window => CodexLayoutHelpers.GetStableOrderIndex(workspaceName, window))
                 .ThenBy(CodexLayoutHelpers.GetWindowSequence)
                 .ThenBy(GetWindowPreferredX)
                 .ThenBy(GetWindowPreferredY)
                 .ThenBy(window => window.Title ?? string.Empty)
                 .ToList();
+
+            return preferLiveTiledOrder && ShouldApplyLiveTiledOrder(workspaceName, orderedWindows)
+                ? ApplyLiveTiledOrder(orderedWindows)
+                : orderedWindows;
         }
 
         CodexLayoutState.PreferredMainHandle = mainWindow.Handle;
@@ -854,9 +864,83 @@ class CodexColumnsLayoutEngine : ILayoutEngine
             .ThenBy(CodexLayoutHelpers.GetWindowSequence)
             .ToList();
 
-        return new[] { mainWindow }
+        orderedWindows = new[] { mainWindow }
             .Concat(secondaryWindows)
             .ToList();
+
+        return preferLiveTiledOrder && ShouldApplyLiveTiledOrder(workspaceName, orderedWindows)
+            ? ApplyLiveTiledOrder(orderedWindows)
+            : orderedWindows;
+    }
+
+    private static bool ShouldApplyLiveTiledOrder(string workspaceName, List<IWindow> orderedWindows)
+    {
+        if (string.IsNullOrWhiteSpace(workspaceName)
+            || orderedWindows == null
+            || !CodexLayoutState.LastCommittedLayoutLocationsByWorkspace.TryGetValue(workspaceName, out var committedLocations)
+            || committedLocations == null)
+        {
+            return false;
+        }
+
+        var tiledWindows = SelectTiledWindows(orderedWindows);
+        if (tiledWindows.Count < 2 || tiledWindows.Any(window => !committedLocations.ContainsKey(window.Handle)))
+        {
+            return false;
+        }
+
+        var movedFarEnough = tiledWindows.Any(window =>
+        {
+            var current = window.Location;
+            var committed = committedLocations[window.Handle];
+            if (current == null || committed == null)
+            {
+                return false;
+            }
+
+            return Math.Abs(current.X - committed.X) >= 80
+                || Math.Abs(current.Y - committed.Y) >= 80;
+        });
+
+        if (!movedFarEnough)
+        {
+            return false;
+        }
+
+        var stableHandles = tiledWindows.Select(window => window.Handle).ToList();
+        var liveHandles = SortByCurrentPosition(tiledWindows).Select(window => window.Handle).ToList();
+        return !stableHandles.SequenceEqual(liveHandles);
+    }
+
+    private static List<IWindow> ApplyLiveTiledOrder(List<IWindow> orderedWindows)
+    {
+        var tiledWindows = SelectTiledWindows(orderedWindows);
+        var tiledHandles = new HashSet<IntPtr>(tiledWindows.Select(window => window.Handle));
+        var overflowWindows = orderedWindows
+            .Where(window => window != null && !tiledHandles.Contains(window.Handle))
+            .ToList();
+        var mainWindow = tiledWindows.FirstOrDefault(IsPinnedMainWindow);
+
+        if (mainWindow == null)
+        {
+            return SortByCurrentPosition(tiledWindows)
+                .Concat(overflowWindows)
+                .ToList();
+        }
+
+        return new[] { mainWindow }
+            .Concat(SortByCurrentPosition(tiledWindows.Where(window => window != mainWindow)))
+            .Concat(overflowWindows)
+            .ToList();
+    }
+
+    private static IEnumerable<IWindow> SortByCurrentPosition(IEnumerable<IWindow> windows)
+    {
+        return windows
+            .Where(window => window != null)
+            .OrderBy(window => window.Location?.X ?? int.MaxValue)
+            .ThenBy(window => window.Location?.Y ?? int.MaxValue)
+            .ThenBy(CodexLayoutHelpers.GetWindowSequence);
     }
 
     private static List<IWindow> SelectTiledWindows(List<IWindow> orderedWindows)
