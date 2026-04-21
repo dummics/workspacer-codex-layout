@@ -202,6 +202,9 @@ static class NativeMethods
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int maxCount);
+
+    [DllImport("user32.dll")]
+    public static extern bool IsWindow(IntPtr hWnd);
 }
 
 static class CodexLayoutHelpers
@@ -498,6 +501,42 @@ static class CodexLayoutHelpers
             && window.ProcessFileName == "Codex.exe"
             && window.Class == "Chrome_WidgetWin_1"
             && !string.IsNullOrWhiteSpace(window.Title);
+    }
+
+    public static bool IsManagedCodexWindow(IWindow window)
+    {
+        if (!IsOfficialCodexWindow(window))
+        {
+            return false;
+        }
+
+        return !IsDuplicatePrimaryCodexWindow(window);
+    }
+
+    public static bool IsPrimaryCodexWindow(IWindow window)
+    {
+        return IsOfficialCodexWindow(window)
+            && string.Equals(window.Title, "Codex", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsDuplicatePrimaryCodexWindow(IWindow window)
+    {
+        if (!IsPrimaryCodexWindow(window)
+            || !CodexLayoutState.PreferredMainHandleConfirmed
+            || CodexLayoutState.PreferredMainHandle == IntPtr.Zero
+            || window.Handle == CodexLayoutState.PreferredMainHandle)
+        {
+            return false;
+        }
+
+        if (NativeMethods.IsWindow(CodexLayoutState.PreferredMainHandle))
+        {
+            return true;
+        }
+
+        CodexLayoutState.PreferredMainHandle = IntPtr.Zero;
+        CodexLayoutState.PreferredMainHandleConfirmed = false;
+        return false;
     }
 
     public static bool IsForegroundCodexWindow()
@@ -842,6 +881,7 @@ class CodexColumnsLayoutEngine : ILayoutEngine
         if (mainWindow == null)
         {
             orderedWindows = windows
+                .Where(CodexLayoutHelpers.IsManagedCodexWindow)
                 .OrderBy(window => CodexLayoutHelpers.GetStableOrderIndex(workspaceName, window))
                 .ThenBy(CodexLayoutHelpers.GetWindowSequence)
                 .ThenBy(GetWindowPreferredX)
@@ -860,6 +900,7 @@ class CodexColumnsLayoutEngine : ILayoutEngine
         // Keep incoming workspace order for secondaries so swap/reorder operations can be reflected.
         var secondaryWindows = windows
             .Where(window => window != mainWindow)
+            .Where(CodexLayoutHelpers.IsManagedCodexWindow)
             .OrderBy(window => CodexLayoutHelpers.GetStableOrderIndex(workspaceName, window))
             .ThenBy(CodexLayoutHelpers.GetWindowSequence)
             .ToList();
@@ -972,8 +1013,28 @@ class CodexColumnsLayoutEngine : ILayoutEngine
             return null;
         }
 
+        if (CodexLayoutState.PreferredMainHandleConfirmed
+            && CodexLayoutState.PreferredMainHandle != IntPtr.Zero)
+        {
+            var preferredMainWindow = windows.FirstOrDefault(window => window?.Handle == CodexLayoutState.PreferredMainHandle);
+            if (preferredMainWindow != null)
+            {
+                return preferredMainWindow;
+            }
+
+            if (NativeMethods.IsWindow(CodexLayoutState.PreferredMainHandle))
+            {
+                return null;
+            }
+            else
+            {
+                CodexLayoutState.PreferredMainHandle = IntPtr.Zero;
+                CodexLayoutState.PreferredMainHandleConfirmed = false;
+            }
+        }
+
         var explicitMainWindow = windows
-            .Where(window => CodexLayoutHelpers.IsOfficialCodexWindow(window))
+            .Where(window => CodexLayoutHelpers.IsManagedCodexWindow(window))
             .Where(window => GetExplicitMainWindowRank(window) < int.MaxValue)
             .OrderBy(GetExplicitMainWindowRank)
             .ThenBy(GetWindowPreferredX)
@@ -987,13 +1048,7 @@ class CodexColumnsLayoutEngine : ILayoutEngine
             return explicitMainWindow;
         }
 
-        if (!CodexLayoutState.PreferredMainHandleConfirmed
-            || CodexLayoutState.PreferredMainHandle == IntPtr.Zero)
-        {
-            return null;
-        }
-
-        return windows.FirstOrDefault(window => window?.Handle == CodexLayoutState.PreferredMainHandle);
+        return null;
     }
 
     private static IEnumerable<IWindowLocation> MapLocationsToOriginalOrder(
@@ -1176,8 +1231,8 @@ Action<IConfigContext> doConfig = (context) =>
         context.WorkspaceContainer.AssignWorkspaceToMonitor(context.WorkspaceContainer[workspaceName], monitor);
     }
 
-    context.WindowRouter.AddFilter(CodexLayoutHelpers.IsOfficialCodexWindow);
-    context.WindowRouter.AddRoute(window => CodexLayoutHelpers.IsOfficialCodexWindow(window) ? CodexLayoutHelpers.GetWorkspaceForWindow(context, window) : null);
+    context.WindowRouter.AddFilter(CodexLayoutHelpers.IsManagedCodexWindow);
+    context.WindowRouter.AddRoute(window => CodexLayoutHelpers.IsManagedCodexWindow(window) ? CodexLayoutHelpers.GetWorkspaceForWindow(context, window) : null);
 
     // Workspacer registers a large set of global Alt-based defaults in the keybind manager
     // constructor. For this Codex-only setup we want a single explicit hotkey and no
