@@ -995,7 +995,7 @@ class CodexColumnsLayoutEngine : ILayoutEngine
         if (mainWindow == null)
         {
             return orderedWindows
-                .Take(CodexLayoutSettings.MaxTiledSecondaryWindows)
+                .Take(CodexLayoutSettings.MaxTiledSecondaryWindows + 1)
                 .ToList();
         }
 
