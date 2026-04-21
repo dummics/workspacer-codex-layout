@@ -30,6 +30,7 @@ static class CodexLayoutSettings
     public const int PrimaryShellMaxProbeNodes = 140;
     public const int PrimaryShellMaxProbeDepth = 12;
     public const int ActiveRelayoutThrottleMs = 120;
+    public const bool EnableLiveManualReorder = false;
     public const bool DiagnosticsEnabled = false;
 
     public const WsKeys ToggleLayoutKey = WsKeys.F2;
@@ -542,6 +543,13 @@ static class CodexLayoutHelpers
         return detected;
     }
 
+    public static bool IsCachedPrimaryShellWindow(IWindow window)
+    {
+        return window != null
+            && CodexLayoutState.PrimaryShellWindowCache.TryGetValue(window.Handle, out var cachedResult)
+            && cachedResult;
+    }
+
     private static bool TryDetectPrimaryShellWindow(IntPtr handle)
     {
         if (handle == IntPtr.Zero)
@@ -800,7 +808,9 @@ class CodexColumnsLayoutEngine : ILayoutEngine
         }
 
         var stableOrderedWindows = OrderWindowsForLayout(_workspaceName, snapshot, preferLiveTiledOrder: false);
-        var hasManualReorderSignal = isForegroundCodex && ShouldApplyLiveTiledOrder(_workspaceName, stableOrderedWindows);
+        var hasManualReorderSignal = CodexLayoutSettings.EnableLiveManualReorder
+            && isForegroundCodex
+            && ShouldApplyLiveTiledOrder(_workspaceName, stableOrderedWindows);
         var orderedWindows = hasManualReorderSignal
             ? ApplyLiveTiledOrder(stableOrderedWindows)
             : stableOrderedWindows;
@@ -1117,7 +1127,7 @@ class CodexColumnsLayoutEngine : ILayoutEngine
         return new[] { mainWindow }
             .Concat(orderedWindows
                 .Where(window => window != mainWindow)
-                .Where(window => !CodexLayoutHelpers.IsPrimaryShellWindow(window))
+                .Where(window => !CodexLayoutHelpers.IsCachedPrimaryShellWindow(window))
                 .Take(CodexLayoutSettings.MaxTiledSecondaryWindows))
             .ToList();
     }
@@ -1133,7 +1143,7 @@ class CodexColumnsLayoutEngine : ILayoutEngine
             && CodexLayoutState.PreferredMainHandle != IntPtr.Zero)
         {
             var preferredMainWindow = windows.FirstOrDefault(window => window?.Handle == CodexLayoutState.PreferredMainHandle);
-            if (preferredMainWindow != null && CodexLayoutHelpers.IsPrimaryShellWindow(preferredMainWindow))
+            if (preferredMainWindow != null)
             {
                 return preferredMainWindow;
             }
