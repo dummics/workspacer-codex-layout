@@ -6,6 +6,8 @@ What it does:
 
 - manages only Codex App for Windows top-level windows
 - includes the main window and detached/extra Codex windows
+- tiles the main window plus up to five secondary Codex windows per monitor
+- keeps additional Codex windows floating instead of forcing tiny overlapping columns
 - leaves every non-Codex app untouched
 - adds a local runtime, startup and recovery layer so the setup is reproducible
 

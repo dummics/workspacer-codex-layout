@@ -19,6 +19,7 @@ static class CodexLayoutSettings
 {
     public const string WorkspacePrefix = "codex-monitor-";
     public const int SoftColumnLimit = 5;
+    public const int MaxTiledSecondaryWindows = 5;
     public const int MinimumRecommendedPrimarySpanPx = 420;
     public const int MainWindowMinimumWidthPx = 800;
     public const int ActiveRelayoutThrottleMs = 120;
@@ -38,6 +39,7 @@ static class CodexLayoutState
         new Dictionary<string, Dictionary<IntPtr, IWindowLocation>>(StringComparer.OrdinalIgnoreCase);
     public static readonly Dictionary<string, List<IntPtr>> LastOrderedHandlesByWorkspace =
         new Dictionary<string, List<IntPtr>>(StringComparer.OrdinalIgnoreCase);
+    public static readonly List<IntPtr> GlobalOrderedHandles = new List<IntPtr>();
     public static IntPtr PreferredMainHandle = IntPtr.Zero;
     public static bool PreferredMainHandleConfirmed;
     public static long NextWindowSequence;
@@ -271,19 +273,29 @@ static class CodexLayoutHelpers
             : long.MaxValue;
     }
 
-    public static IReadOnlyDictionary<IntPtr, int> GetLastOrderIndexes(string workspaceName)
+    public static int GetStableOrderIndex(string workspaceName, IWindow window)
     {
-        if (string.IsNullOrWhiteSpace(workspaceName)
-            || !CodexLayoutState.LastOrderedHandlesByWorkspace.TryGetValue(workspaceName, out var handles)
-            || handles == null
-            || handles.Count == 0)
+        if (window == null)
         {
-            return null;
+            return int.MaxValue;
         }
 
-        return handles
-            .Select((handle, index) => new { handle, index })
-            .ToDictionary(item => item.handle, item => item.index);
+        if (!string.IsNullOrWhiteSpace(workspaceName)
+            && CodexLayoutState.LastOrderedHandlesByWorkspace.TryGetValue(workspaceName, out var workspaceHandles)
+            && workspaceHandles != null
+            && workspaceHandles.Count > 0)
+        {
+            var workspaceIndex = workspaceHandles.IndexOf(window.Handle);
+            return workspaceIndex >= 0 ? workspaceIndex : int.MaxValue;
+        }
+
+        var globalIndex = CodexLayoutState.GlobalOrderedHandles.IndexOf(window.Handle);
+        if (globalIndex >= 0)
+        {
+            return globalIndex;
+        }
+
+        return int.MaxValue;
     }
 
     public static void SaveOrderedHandles(string workspaceName, IEnumerable<IWindow> orderedWindows)
@@ -302,6 +314,14 @@ static class CodexLayoutHelpers
         if (handles.Count > 0)
         {
             CodexLayoutState.LastOrderedHandlesByWorkspace[workspaceName] = handles;
+
+            foreach (var handle in handles)
+            {
+                if (!CodexLayoutState.GlobalOrderedHandles.Contains(handle))
+                {
+                    CodexLayoutState.GlobalOrderedHandles.Add(handle);
+                }
+            }
         }
     }
 
@@ -335,6 +355,14 @@ static class CodexLayoutHelpers
             if (orderedHandles.Count > 0)
             {
                 CodexLayoutState.LastOrderedHandlesByWorkspace[group.Key] = orderedHandles;
+
+                foreach (var handle in orderedHandles)
+                {
+                    if (!CodexLayoutState.GlobalOrderedHandles.Contains(handle))
+                    {
+                        CodexLayoutState.GlobalOrderedHandles.Add(handle);
+                    }
+                }
             }
         }
     }
@@ -653,14 +681,17 @@ class CodexColumnsLayoutEngine : ILayoutEngine
         // This avoids replacing user positioning hints with transient tile coordinates.
         CodexLayoutHelpers.RememberFloatingLocations(snapshot, overwrite: false);
 
+        var orderedWindows = OrderWindowsForLayout(_workspaceName, snapshot);
+        var tiledWindows = SelectTiledWindows(orderedWindows);
         var useRows = spaceHeight > spaceWidth;
-        var primarySpan = Math.Max(1, (useRows ? spaceHeight : spaceWidth) / snapshot.Count);
-        var aboveSoftLimit = _softColumnLimit > 0 && snapshot.Count > _softColumnLimit;
+        var tiledWindowCount = Math.Max(1, tiledWindows.Count);
+        var primarySpan = Math.Max(1, (useRows ? spaceHeight : spaceWidth) / tiledWindowCount);
+        var aboveSoftLimit = _softColumnLimit > 0 && tiledWindowCount > _softColumnLimit;
         var belowRecommendedSpan = primarySpan < _minimumRecommendedPrimarySpanPx;
 
-        if ((aboveSoftLimit || belowRecommendedSpan) && _lastWarningWindowCount != snapshot.Count)
+        if ((aboveSoftLimit || belowRecommendedSpan) && _lastWarningWindowCount != tiledWindowCount)
         {
-            _lastWarningWindowCount = snapshot.Count;
+            _lastWarningWindowCount = tiledWindowCount;
         }
         else if (!aboveSoftLimit && !belowRecommendedSpan)
         {
@@ -669,12 +700,11 @@ class CodexColumnsLayoutEngine : ILayoutEngine
 
         _lastManagedWindowCount = snapshot.Count;
 
-        var orderedWindows = OrderWindowsForLayout(_workspaceName, snapshot);
         var orderedLocations = useRows
-            ? _rows.CalcLayout(orderedWindows, spaceWidth, spaceHeight)
-            : CalcLandscapeLayout(orderedWindows, spaceWidth, spaceHeight);
+            ? _rows.CalcLayout(tiledWindows, spaceWidth, spaceHeight)
+            : CalcLandscapeLayout(tiledWindows, spaceWidth, spaceHeight);
 
-        var mappedLocations = MapLocationsToOriginalOrder(snapshot, orderedWindows, orderedLocations);
+        var mappedLocations = MapLocationsToOriginalOrder(snapshot, tiledWindows, orderedLocations);
         CodexLayoutState.LastLayoutCommitUtc[_workspaceName] = DateTime.UtcNow;
         CodexLayoutHelpers.SaveOrderedHandles(_workspaceName, orderedWindows);
         CodexLayoutState.LastCommittedLayoutLocationsByWorkspace[_workspaceName] =
@@ -802,12 +832,11 @@ class CodexColumnsLayoutEngine : ILayoutEngine
     private static List<IWindow> OrderWindowsForLayout(string workspaceName, List<IWindow> windows)
     {
         var mainWindow = GetPinnedMainWindow(windows);
-        var stableOrderIndexes = CodexLayoutHelpers.GetLastOrderIndexes(workspaceName);
 
         if (mainWindow == null)
         {
             return windows
-                .OrderBy(window => stableOrderIndexes != null && stableOrderIndexes.TryGetValue(window.Handle, out var orderIndex) ? orderIndex : int.MaxValue)
+                .OrderBy(window => CodexLayoutHelpers.GetStableOrderIndex(workspaceName, window))
                 .ThenBy(CodexLayoutHelpers.GetWindowSequence)
                 .ThenBy(GetWindowPreferredX)
                 .ThenBy(GetWindowPreferredY)
@@ -821,12 +850,34 @@ class CodexColumnsLayoutEngine : ILayoutEngine
         // Keep incoming workspace order for secondaries so swap/reorder operations can be reflected.
         var secondaryWindows = windows
             .Where(window => window != mainWindow)
-            .OrderBy(window => stableOrderIndexes != null && stableOrderIndexes.TryGetValue(window.Handle, out var orderIndex) ? orderIndex : int.MaxValue)
+            .OrderBy(window => CodexLayoutHelpers.GetStableOrderIndex(workspaceName, window))
             .ThenBy(CodexLayoutHelpers.GetWindowSequence)
             .ToList();
 
         return new[] { mainWindow }
             .Concat(secondaryWindows)
+            .ToList();
+    }
+
+    private static List<IWindow> SelectTiledWindows(List<IWindow> orderedWindows)
+    {
+        if (orderedWindows == null || orderedWindows.Count == 0)
+        {
+            return new List<IWindow>();
+        }
+
+        var mainWindow = orderedWindows.FirstOrDefault(IsPinnedMainWindow);
+        if (mainWindow == null)
+        {
+            return orderedWindows
+                .Take(CodexLayoutSettings.MaxTiledSecondaryWindows)
+                .ToList();
+        }
+
+        return new[] { mainWindow }
+            .Concat(orderedWindows
+                .Where(window => window != mainWindow)
+                .Take(CodexLayoutSettings.MaxTiledSecondaryWindows))
             .ToList();
     }
 
@@ -870,7 +921,35 @@ class CodexColumnsLayoutEngine : ILayoutEngine
             .Zip(orderedLocations, (window, location) => new { window.Handle, Location = location })
             .ToDictionary(item => item.Handle, item => item.Location);
 
-        return originalWindows.Select(window => locationsByHandle[window.Handle]).ToList();
+        return originalWindows
+            .Select(window => locationsByHandle.TryGetValue(window.Handle, out var location)
+                ? location
+                : GetUntiledWindowLocation(window))
+            .ToList();
+    }
+
+    private static IWindowLocation GetUntiledWindowLocation(IWindow window)
+    {
+        if (window == null)
+        {
+            return new WindowLocation(0, 0, 960, 720, WindowState.Normal);
+        }
+
+        if (CodexLayoutState.LastFloatingLocations.TryGetValue(window.Handle, out var savedLocation)
+            && savedLocation != null
+            && savedLocation.Width > 0
+            && savedLocation.Height > 0)
+        {
+            return CodexLayoutHelpers.CloneLocation(savedLocation);
+        }
+
+        var currentLocation = CodexLayoutHelpers.CloneLocation(window.Location);
+        if (currentLocation != null && currentLocation.Width > 0 && currentLocation.Height > 0)
+        {
+            return currentLocation;
+        }
+
+        return new WindowLocation(0, 0, 960, 720, WindowState.Normal);
     }
 
     private static int GetMainWindowRank(IWindow window)
